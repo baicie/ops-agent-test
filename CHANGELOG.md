@@ -17,7 +17,7 @@ All notable changes to OpsCodex are documented in this file. The format follows
 - Append-only JSONL threads with replay-safe REST and SSE APIs.
 - React investigation UI with streaming, evidence, approvals, and interruption.
 - Deterministic order-service and Prometheus incident demo.
-- Protected manual Docker/OpenAI release acceptance with redacted evidence.
+- Protected manual Docker/Responses release acceptance with redacted evidence.
 - Rust, frontend, API, runtime, tool-safety, and demo integration tests.
 
 [Unreleased]: https://github.com/baicie/ops-agent-test/compare/v0.1.0...HEAD

@@ -8,6 +8,7 @@ compose_file="${OPSCODEX_COMPOSE_FILE:-${repo_root}/demo/docker-compose.yml}"
 binary="${OPSCODEX_BINARY:-${repo_root}/target/release/opscodex}"
 artifact_dir="${OPSCODEX_ACCEPTANCE_ARTIFACT_DIR:-${repo_root}/artifacts/live-openai-acceptance}"
 model="${OPSCODEX_MODEL:-gpt-5.2}"
+model_endpoint="${OPSCODEX_MODEL_ENDPOINT:-https://api.openai.com/v1/responses}"
 baseline_seconds="${OPSCODEX_BASELINE_SECONDS:-60}"
 fault_seconds="${OPSCODEX_FAULT_SECONDS:-30}"
 api_key="${OPENAI_API_KEY:-}"
@@ -79,6 +80,12 @@ fi
 if [[ ! "${model}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
   fail "OPSCODEX_MODEL contains unsupported characters"
 fi
+if [[ "${model_endpoint}" != https://*/responses \
+  || "${model_endpoint}" == *\"* \
+  || "${model_endpoint}" == *\\* \
+  || "${model_endpoint}" =~ [[:space:]] ]]; then
+  fail "OPSCODEX_MODEL_ENDPOINT must be a safe HTTPS Responses endpoint"
+fi
 if [[ ! "${baseline_seconds}" =~ ^[0-9]+$ || ! "${fault_seconds}" =~ ^[0-9]+$ ]]; then
   fail "baseline and fault observation durations must be whole seconds"
 fi
@@ -97,7 +104,7 @@ cat >"${work_dir}/config.toml" <<EOF
 provider = "openai"
 model = "${model}"
 api_key_env = "OPENAI_API_KEY"
-endpoint = "https://api.openai.com/v1/responses"
+endpoint = "${model_endpoint}"
 
 [runtime]
 max_steps = 12
@@ -225,7 +232,7 @@ jq --null-input \
     }
   }' >"${work_dir}/observations.json"
 
-printf 'Running the real OpenAI-backed OpsCodex investigation...\n'
+printf 'Running the real Responses-compatible OpsCodex investigation...\n'
 set +e
 (run_agent) >"${work_dir}/cli.log" 2>&1
 cli_exit_code=$?

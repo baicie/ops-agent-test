@@ -28,7 +28,7 @@ Axum App Server
      |
 Agent Runtime ---- JSONL Thread Store
      |
-     +---- ModelProvider ---- OpenAI Responses API
+     +---- ModelProvider ---- OpenAI-compatible Responses API
      |
      +---- Tool Registry ---- Prometheus / Docker / HTTP / approved Exec
 ```
@@ -40,7 +40,7 @@ The Runtime only depends on the project's `ModelProvider` contract. OpenAI reque
 - Rust 1.88 or newer
 - Node.js 20 or newer
 - Docker Compose for the complete incident demo
-- An OpenAI API key for the real model provider
+- An API key for OpenAI or another Responses-compatible model provider
 
 Docker is not required for unit tests or the local fake-model walkthrough.
 
@@ -69,12 +69,12 @@ npm run dev
 
 The Vite UI is then available at `http://127.0.0.1:5173` and proxies API/SSE traffic to port 3000.
 
-## Run with OpenAI
+## Run with a Responses-compatible provider
 
 ```sh
 mkdir -p ~/.opscodex
 cp config.example.toml ~/.opscodex/config.toml
-printf 'OpenAI API key: ' >&2
+printf 'Model API key: ' >&2
 IFS= read -rs OPENAI_API_KEY
 printf '\n' >&2
 export OPENAI_API_KEY
@@ -82,7 +82,9 @@ cargo run -- run "Why is order-service failing?"
 unset OPENAI_API_KEY
 ```
 
-The model name and Responses endpoint are configurable. The default example model is not a guarantee of account availability; set `[model].model` to a Responses-compatible model available to your OpenAI project.
+The model name and full Responses endpoint are configurable. The default example
+model is not a guarantee of account availability; set `[model].model` and
+`[model].endpoint` to values supported by your provider.
 
 Start the web server with the real provider:
 
@@ -192,7 +194,13 @@ The full live-environment acceptance, release, and rollback procedure is in
 [RELEASING.md](RELEASING.md). Release notes are maintained in
 [CHANGELOG.md](CHANGELOG.md).
 
-The OpenAI boundary is tested against a local SSE fixture, so tests never require or transmit an API key. Its wire mapping was cross-checked against the official [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create) and [function calling](https://developers.openai.com/api/docs/guides/function-calling) documentation. CI also builds the two-container demo and verifies the complete database-pool incident; the real OpenAI investigation remains a release acceptance gate.
+The OpenAI-compatible boundary is tested against a local SSE fixture, so tests
+never require or transmit an API key. Its wire mapping was cross-checked against
+the official [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create)
+and [function calling](https://developers.openai.com/api/docs/guides/function-calling)
+documentation. CI also builds the two-container demo and verifies the complete
+database-pool incident; a real Responses-compatible investigation remains a
+release acceptance gate.
 
 ## License
 

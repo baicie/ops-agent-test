@@ -1,6 +1,7 @@
 /target/
 /web/node_modules/
 /web/dist/
+/artifacts/
 __pycache__/
 *.py[cod]
 .DS_Store

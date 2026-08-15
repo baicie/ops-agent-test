@@ -2,13 +2,13 @@
 
 OpsCodex v0.1 is released only after automated checks and the real incident
 workflow pass. A fake-model run is useful for development, but it is not a
-substitute for the Docker and OpenAI acceptance test below.
+substitute for the Docker and Responses-compatible model acceptance test below.
 
 ## 1. Prerequisites
 
 - A clean Git worktree on `main`.
 - Docker Compose with a running Docker daemon.
-- An OpenAI API key and a Responses-compatible model available to the project.
+- An API key and a Responses-compatible model available to the project.
 - GitHub CLI authentication with `repo` and `workflow` scopes.
 - A protected GitHub environment named `release`, restricted to `main`, with a
   required reviewer and an `OPENAI_API_KEY` environment secret.
@@ -42,6 +42,11 @@ interactive terminal; do not put the value on the command line:
 ```sh
 gh secret set OPENAI_API_KEY --env release --repo baicie/ops-agent-test
 ```
+
+For v0.1.0, the workflow pins `deepseek-v4-flash` at
+`https://opencode.ai/zen/go/v1/responses`. The secret name is retained as the
+provider adapter's key environment variable; it contains the selected provider's
+API key.
 
 Dispatch the workflow from the exact `main` commit intended for release:
 
@@ -83,7 +88,7 @@ cat "${answer_file}"
 ```
 
 The workflow establishes a healthy baseline, injects database-pool exhaustion,
-runs the release binary against the real OpenAI Responses API, verifies the
+runs the release binary against the pinned Responses-compatible API, verifies the
 persisted Model -> Tool -> Evidence -> Model sequence, and uploads only bounded,
 redacted evidence. It never uploads the raw JSONL event log.
 
@@ -119,7 +124,7 @@ Configure the real model provider, then run the CLI:
 ```sh
 mkdir -p ~/.opscodex
 cp config.example.toml ~/.opscodex/config.toml
-printf 'OpenAI API key: ' >&2
+printf 'Model API key: ' >&2
 IFS= read -rs OPENAI_API_KEY
 printf '\n' >&2
 export OPENAI_API_KEY
