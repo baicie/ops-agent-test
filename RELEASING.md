@@ -46,7 +46,8 @@ gh secret set OPENAI_API_KEY --env release --repo baicie/ops-agent-test
 For v0.1.0, the workflow pins `deepseek-v4-flash` at
 `https://opencode.ai/zen/go/v1/responses`. The secret name is retained as the
 provider adapter's key environment variable; it contains the selected provider's
-API key.
+API key. The gate also sets `reasoning_effort = "none"` so each bounded tool loop
+remains stateless and no hidden reasoning text needs to be persisted or replayed.
 
 Dispatch the workflow from the exact `main` commit intended for release:
 

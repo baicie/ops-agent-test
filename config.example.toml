@@ -3,6 +3,7 @@ provider = "openai"
 model = "gpt-5.2"
 api_key_env = "OPENAI_API_KEY"
 endpoint = "https://api.openai.com/v1/responses"
+# reasoning_effort = "none"
 
 [runtime]
 max_steps = 12

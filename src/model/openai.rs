@@ -17,6 +17,7 @@ pub struct OpenAIResponsesProvider {
     api_key: String,
     model: String,
     endpoint: String,
+    reasoning_effort: Option<String>,
 }
 
 impl OpenAIResponsesProvider {
@@ -26,11 +27,17 @@ impl OpenAIResponsesProvider {
             api_key: api_key.into(),
             model: model.into(),
             endpoint: DEFAULT_ENDPOINT.into(),
+            reasoning_effort: None,
         }
     }
 
     pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
         self.endpoint = endpoint.into();
+        self
+    }
+
+    pub fn with_reasoning_effort(mut self, effort: impl Into<String>) -> Self {
+        self.reasoning_effort = Some(effort.into());
         self
     }
 
@@ -52,13 +59,17 @@ impl OpenAIResponsesProvider {
                 })
             })
             .collect::<Vec<_>>();
-        json!({
+        let mut body = json!({
             "model": self.model,
             "instructions": request.instructions,
             "input": input,
             "tools": tools,
             "stream": true
-        })
+        });
+        if let Some(effort) = &self.reasoning_effort {
+            body["reasoning"] = json!({"effort": effort});
+        }
+        body
     }
 }
 

@@ -85,6 +85,8 @@ unset OPENAI_API_KEY
 The model name and full Responses endpoint are configurable. The default example
 model is not a guarantee of account availability; set `[model].model` and
 `[model].endpoint` to values supported by your provider.
+Set optional `[model].reasoning_effort` to `none`, `minimal`, `low`, `medium`,
+`high`, or `xhigh` only when the selected model supports that Responses option.
 
 Start the web server with the real provider:
 

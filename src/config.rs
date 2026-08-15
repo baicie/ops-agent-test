@@ -85,6 +85,17 @@ impl Config {
                 "model.model must not be empty".into(),
             ));
         }
+        if let Some(reasoning_effort) = self.model.reasoning_effort.as_deref()
+            && !matches!(
+                reasoning_effort,
+                "none" | "minimal" | "low" | "medium" | "high" | "xhigh"
+            )
+        {
+            return Err(OpsCodexError::Protocol(
+                "model.reasoning_effort must be one of none, minimal, low, medium, high, or xhigh"
+                    .into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -96,6 +107,7 @@ pub struct ModelConfig {
     pub model: String,
     pub api_key_env: String,
     pub endpoint: String,
+    pub reasoning_effort: Option<String>,
 }
 
 impl Default for ModelConfig {
@@ -105,6 +117,7 @@ impl Default for ModelConfig {
             model: "gpt-5.2".into(),
             api_key_env: "OPENAI_API_KEY".into(),
             endpoint: "https://api.openai.com/v1/responses".into(),
+            reasoning_effort: None,
         }
     }
 }

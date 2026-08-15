@@ -11,8 +11,8 @@ All notable changes to OpsCodex are documented in this file. The format follows
 ### Added
 
 - Rust Agent Runtime with a bounded Model -> Tool -> Evidence -> Model loop.
-- OpenAI Responses API provider with streaming, function calls, usage, errors,
-  timeouts, and cancellation.
+- OpenAI Responses API provider with configurable reasoning effort, streaming,
+  function calls, usage, errors, timeouts, and cancellation.
 - PromQL, Docker logs, HTTP GET, and approval-gated exec tools.
 - Append-only JSONL threads with replay-safe REST and SSE APIs.
 - React investigation UI with streaming, evidence, approvals, and interruption.

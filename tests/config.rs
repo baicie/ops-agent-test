@@ -39,3 +39,15 @@ fn zero_limits_are_rejected() {
     let error = Config::from_toml("[runtime]\nmax_steps = 0").unwrap_err();
     assert!(error.to_string().contains("max_steps"));
 }
+
+#[test]
+fn reasoning_effort_is_optional_and_rejects_unknown_values() -> anyhow::Result<()> {
+    assert_eq!(Config::default().model.reasoning_effort, None);
+
+    let config = Config::from_toml("[model]\nreasoning_effort = \"none\"")?;
+    assert_eq!(config.model.reasoning_effort.as_deref(), Some("none"));
+
+    let error = Config::from_toml("[model]\nreasoning_effort = \"fast\"").unwrap_err();
+    assert!(error.to_string().contains("reasoning_effort"));
+    Ok(())
+}

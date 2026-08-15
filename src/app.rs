@@ -38,10 +38,12 @@ pub async fn build_runtime(config: &Config, fake_model: bool) -> Result<Arc<Agen
     let model: Arc<dyn ModelProvider> = if fake_model || config.model.provider == "fake" {
         Arc::new(DemoModelProvider)
     } else if config.model.provider == "openai" {
-        Arc::new(
-            OpenAIResponsesProvider::new(config.api_key()?, &config.model.model)
-                .with_endpoint(&config.model.endpoint),
-        )
+        let mut provider = OpenAIResponsesProvider::new(config.api_key()?, &config.model.model)
+            .with_endpoint(&config.model.endpoint);
+        if let Some(effort) = &config.model.reasoning_effort {
+            provider = provider.with_reasoning_effort(effort);
+        }
+        Arc::new(provider)
     } else {
         return Err(OpsCodexError::Model(format!(
             "unsupported model provider `{}`",

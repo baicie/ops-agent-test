@@ -44,6 +44,7 @@ jobs:
           OPSCODEX_ACCEPTANCE_ARTIFACT_DIR: ${{ runner.temp }}/opscodex-live-acceptance
           OPSCODEX_MODEL: deepseek-v4-flash
           OPSCODEX_MODEL_ENDPOINT: https://opencode.ai/zen/go/v1/responses
+          OPSCODEX_REASONING_EFFORT: none
         run: bash scripts/live_openai_acceptance.sh
 
       - name: Stop demo containers

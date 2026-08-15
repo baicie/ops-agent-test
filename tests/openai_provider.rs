@@ -26,7 +26,8 @@ async fn responses_provider_streams_text_and_decodes_function_calls() -> anyhow:
     let server = tokio::spawn(async move { axum::serve(listener, app).await });
 
     let provider = OpenAIResponsesProvider::new("test-key", "gpt-test")
-        .with_endpoint(format!("http://{address}/v1/responses"));
+        .with_endpoint(format!("http://{address}/v1/responses"))
+        .with_reasoning_effort("none");
     let (sink, mut deltas) = mpsc::unbounded_channel();
     let response = provider
         .complete(
@@ -70,6 +71,7 @@ async fn responses_provider_streams_text_and_decodes_function_calls() -> anyhow:
     let request = captured.lock().unwrap().clone().expect("request body");
     assert_eq!(request["model"], "gpt-test");
     assert_eq!(request["stream"], true);
+    assert_eq!(request["reasoning"]["effort"], "none");
     assert_eq!(request["tools"][0]["type"], "function");
     assert_eq!(request["tools"][0]["name"], "http_get");
     assert!(request["tools"][0].get("strict").is_none());

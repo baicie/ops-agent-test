@@ -9,6 +9,7 @@ binary="${OPSCODEX_BINARY:-${repo_root}/target/release/opscodex}"
 artifact_dir="${OPSCODEX_ACCEPTANCE_ARTIFACT_DIR:-${repo_root}/artifacts/live-openai-acceptance}"
 model="${OPSCODEX_MODEL:-gpt-5.2}"
 model_endpoint="${OPSCODEX_MODEL_ENDPOINT:-https://api.openai.com/v1/responses}"
+reasoning_effort="${OPSCODEX_REASONING_EFFORT:-}"
 baseline_seconds="${OPSCODEX_BASELINE_SECONDS:-60}"
 fault_seconds="${OPSCODEX_FAULT_SECONDS:-30}"
 api_key="${OPENAI_API_KEY:-}"
@@ -86,6 +87,10 @@ if [[ "${model_endpoint}" != https://*/responses \
   || "${model_endpoint}" =~ [[:space:]] ]]; then
   fail "OPSCODEX_MODEL_ENDPOINT must be a safe HTTPS Responses endpoint"
 fi
+if [[ -n "${reasoning_effort}" \
+  && ! "${reasoning_effort}" =~ ^(none|minimal|low|medium|high|xhigh)$ ]]; then
+  fail "OPSCODEX_REASONING_EFFORT contains an unsupported value"
+fi
 if [[ ! "${baseline_seconds}" =~ ^[0-9]+$ || ! "${fault_seconds}" =~ ^[0-9]+$ ]]; then
   fail "baseline and fault observation durations must be whole seconds"
 fi
@@ -98,6 +103,10 @@ done
 
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/opscodex-live-acceptance.XXXXXX")"
 mkdir -p "${work_dir}/state"
+reasoning_config=""
+if [[ -n "${reasoning_effort}" ]]; then
+  reasoning_config="reasoning_effort = \"${reasoning_effort}\""
+fi
 
 cat >"${work_dir}/config.toml" <<EOF
 [model]
@@ -105,6 +114,7 @@ provider = "openai"
 model = "${model}"
 api_key_env = "OPENAI_API_KEY"
 endpoint = "${model_endpoint}"
+${reasoning_config}
 
 [runtime]
 max_steps = 12
