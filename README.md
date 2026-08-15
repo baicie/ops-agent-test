@@ -37,7 +37,7 @@ The Runtime only depends on the project's `ModelProvider` contract. OpenAI reque
 
 ## Prerequisites
 
-- Rust 1.85 or newer
+- Rust 1.88 or newer
 - Node.js 20 or newer
 - Docker Compose for the complete incident demo
 - An OpenAI API key for the real model provider
@@ -74,8 +74,12 @@ The Vite UI is then available at `http://127.0.0.1:5173` and proxies API/SSE tra
 ```sh
 mkdir -p ~/.opscodex
 cp config.example.toml ~/.opscodex/config.toml
-export OPENAI_API_KEY="your-api-key"
+printf 'OpenAI API key: ' >&2
+IFS= read -rs OPENAI_API_KEY
+printf '\n' >&2
+export OPENAI_API_KEY
 cargo run -- run "Why is order-service failing?"
+unset OPENAI_API_KEY
 ```
 
 The model name and Responses endpoint are configurable. The default example model is not a guarantee of account availability; set `[model].model` to a Responses-compatible model available to your OpenAI project.
@@ -183,4 +187,12 @@ cd web && npm test && npm run build
 python3 -m unittest discover -s demo/order-service/tests -v
 ```
 
-The OpenAI boundary is tested against a local SSE fixture, so tests never require or transmit an API key. Its wire mapping was cross-checked against the official [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create) and [function calling](https://developers.openai.com/api/docs/guides/function-calling) documentation. Docker is unavailable in this development environment, so live Compose verification remains environment-dependent; the demo is covered by Python integration tests and static Compose validation.
+The full live-environment acceptance, release, and rollback procedure is in
+[RELEASING.md](RELEASING.md). Release notes are maintained in
+[CHANGELOG.md](CHANGELOG.md).
+
+The OpenAI boundary is tested against a local SSE fixture, so tests never require or transmit an API key. Its wire mapping was cross-checked against the official [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create) and [function calling](https://developers.openai.com/api/docs/guides/function-calling) documentation. CI also builds the two-container demo and verifies the complete database-pool incident; the real OpenAI investigation remains a release acceptance gate.
+
+## License
+
+OpsCodex is available under the [MIT License](LICENSE).

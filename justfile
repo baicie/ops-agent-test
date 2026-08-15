@@ -7,10 +7,10 @@ fmt-check:
     cargo fmt --check
 
 rust-test:
-    cargo test --all-targets
+    cargo test --locked --all-targets
 
 clippy:
-    cargo clippy --all-targets --all-features -- -D warnings
+    cargo clippy --locked --all-targets --all-features -- -D warnings
 
 web-install:
     cd web && npm ci
@@ -24,12 +24,20 @@ web-build:
 demo-test:
     python3 -m unittest discover -s demo/order-service/tests -v
 
+audit:
+    cargo audit
+    cargo deny --locked check advisories licenses bans sources
+    cd web && npm audit --audit-level=high --registry=https://registry.npmjs.org
+
 test: rust-test web-test demo-test
 
 check: fmt-check clippy test web-build
 
+release-check: web-install check audit
+    cargo build --locked --release
+
 build: web-build
-    cargo build --release
+    cargo build --locked --release
 
 serve *args:
     cargo run -- serve {{args}}

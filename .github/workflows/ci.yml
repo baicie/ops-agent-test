@@ -1,0 +1,214 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          toolchain: "1.88"
+          components: clippy, rustfmt
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Install dependency audit tools
+        uses: taiki-e/install-action@b27e114ddbae5cc01df19a22cf70a124d5177567 # v2
+        with:
+          tool: cargo-audit@0.22.2,cargo-deny@0.20.2
+
+      - name: Audit RustSec advisories
+        run: cargo audit
+
+      - name: Check dependency policy
+        run: cargo deny --locked check advisories licenses bans sources
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked --all-targets
+
+      - name: Build release binary
+        run: cargo build --locked --release
+
+  web:
+    name: Web
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit dependencies
+        run: npm audit --audit-level=high --registry=https://registry.npmjs.org
+
+      - name: Run tests
+        run: npm test
+
+      - name: Run type check
+        run: npm run typecheck
+
+      - name: Build production assets
+        run: npm run build
+
+  demo:
+    name: Demo
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Run demo tests
+        run: python -m unittest discover -s demo/order-service/tests -v
+
+  demo-smoke:
+    name: Demo containers
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate Compose configuration
+        run: docker compose -f demo/docker-compose.yml config --quiet
+
+      - name: Start demo stack
+        run: >-
+          docker compose -f demo/docker-compose.yml up --build --detach
+          --wait --wait-timeout 120
+
+      - name: Verify healthy stack
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          curl --fail --silent --show-error http://127.0.0.1:8080/health \
+            | jq --exit-status '.status == "ok" and .mode == "normal"'
+
+          curl --fail --silent --show-error \
+            --retry 15 --retry-all-errors --retry-delay 2 \
+            http://127.0.0.1:9090/-/ready
+
+          for _ in {1..15}; do
+            if curl --fail --silent --show-error --get \
+              --data-urlencode 'query=up{job="order-service"}' \
+              http://127.0.0.1:9090/api/v1/query \
+              | jq --exit-status \
+                '.status == "success" and any(.data.result[]?; .value[1] == "1")' \
+                >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "Prometheus did not report order-service as up" >&2
+          exit 1
+
+      - name: Verify database-pool incident
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          query_prometheus() {
+            curl --fail --silent --show-error --get \
+              --data-urlencode "query=$1" \
+              http://127.0.0.1:9090/api/v1/query
+          }
+
+          curl --fail --silent --show-error --request POST \
+            http://127.0.0.1:8080/debug/fault/db-pool \
+            | jq --exit-status '.mode == "db-pool"'
+
+          curl --fail --silent --show-error http://127.0.0.1:8080/health \
+            | jq --exit-status '.status == "degraded" and .mode == "db-pool"'
+
+          status="$(curl --silent --show-error --output /tmp/order-response.json \
+            --write-out '%{http_code}' --request POST \
+            --header 'content-type: application/json' --data '{}' \
+            http://127.0.0.1:8080/orders)"
+          test "${status}" = "500"
+          jq --exit-status \
+            '.error == "database pool exhausted" and .mode == "db-pool"' \
+            /tmp/order-response.json
+
+          docker compose -f demo/docker-compose.yml logs --no-color order-service \
+            | grep --fixed-strings "database pool exhausted"
+
+          for attempt in {1..15}; do
+            if query_prometheus \
+              'db_pool_waiting{service="order-service"}' \
+              | jq --exit-status \
+                '.status == "success" and any(.data.result[]?; (.value[1] | tonumber) > 0)' \
+                >/dev/null \
+              && query_prometheus \
+                'sum(http_requests_total{service="order-service",route="/orders",status="500"})' \
+              | jq --exit-status \
+                '.status == "success" and any(.data.result[]?; (.value[1] | tonumber) > 0)' \
+                >/dev/null \
+              && query_prometheus \
+                'sum(http_request_duration_seconds_sum{service="order-service",route="/orders",status="500"}) / sum(http_request_duration_seconds_count{service="order-service",route="/orders",status="500"})' \
+              | jq --exit-status \
+                '.status == "success" and any(.data.result[]?; (.value[1] | tonumber) > 2)' \
+                >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "Prometheus did not expose the expected incident metrics" >&2
+          exit 1
+
+      - name: Show container diagnostics
+        if: failure()
+        run: |
+          docker compose -f demo/docker-compose.yml ps
+          docker compose -f demo/docker-compose.yml logs --no-color
+
+      - name: Stop demo stack
+        if: always()
+        run: >-
+          docker compose -f demo/docker-compose.yml down
+          --volumes --remove-orphans
