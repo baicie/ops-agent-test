@@ -197,6 +197,7 @@ async fn replay_ignores_a_partial_tail_but_rejects_a_bad_completed_line() {
     file.write_all(br#"{"seq":2,"type":"user_mes"#)
         .await
         .unwrap();
+    file.flush().await.unwrap();
     drop(file);
 
     let events = store.events_after(&thread_id, 0).await.unwrap();
@@ -211,6 +212,7 @@ async fn replay_ignores_a_partial_tail_but_rejects_a_bad_completed_line() {
         .await
         .unwrap();
     file.write_all(b"not-json\n").await.unwrap();
+    file.flush().await.unwrap();
     drop(file);
 
     assert!(store.events_after(&malformed_thread, 0).await.is_err());
@@ -231,6 +233,7 @@ async fn append_recovers_from_a_partial_tail_without_reusing_a_sequence() {
         .await
         .unwrap();
     file.write_all(br#"{"seq":2,"thread_id"#).await.unwrap();
+    file.flush().await.unwrap();
     drop(file);
 
     let appended = store

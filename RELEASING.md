@@ -18,7 +18,7 @@ release artifacts. OpsCodex reads the key from the environment variable named by
 
 ## 2. Automated release gate
 
-Run the same checks as CI:
+Run the local automated checks:
 
 ```sh
 just release-check
@@ -27,6 +27,9 @@ just release-check
 Required result: formatting, Clippy, all Rust/frontend/demo tests, type checking,
 production builds, RustSec advisories, dependency policy, and npm audit pass
 without policy violations or high/critical findings.
+
+GitHub Actions must also pass the `Demo containers` job, which builds the
+Compose stack and validates the Prometheus, HTTP, and Docker log evidence path.
 
 ## 3. Real incident acceptance
 
