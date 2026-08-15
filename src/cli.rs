@@ -1,0 +1,180 @@
+use std::{
+    io::{self, Write},
+    net::SocketAddr,
+    path::PathBuf,
+};
+
+use clap::{Parser, Subcommand};
+use tokio::sync::broadcast;
+use tokio_util::sync::CancellationToken;
+
+use crate::{
+    OpsCodexError, Result,
+    app::build_runtime,
+    config::Config,
+    runtime::{AgentRuntime, EventEnvelope, RuntimeEvent, ThreadId, TurnId},
+    server::{ServerState, router_with_web},
+};
+
+#[derive(Debug, Parser)]
+#[command(name = "opscodex", version, about = "Local-first AIOps agent runtime")]
+pub struct Cli {
+    #[arg(long, global = true, value_name = "FILE")]
+    pub config: Option<PathBuf>,
+    #[arg(long, global = true)]
+    pub enable_exec: bool,
+    #[arg(
+        long,
+        global = true,
+        help = "Use the deterministic local model provider"
+    )]
+    pub fake_model: bool,
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    Run {
+        #[arg(value_name = "PROMPT")]
+        input: String,
+    },
+    Serve {
+        #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        port: Option<u16>,
+        #[arg(long, default_value = "web/dist")]
+        web_dir: PathBuf,
+    },
+}
+
+pub async fn execute(cli: Cli) -> Result<()> {
+    let mut config = Config::load(cli.config.as_deref())?;
+    if cli.enable_exec {
+        config.tools.exec = true;
+    }
+    config.validate()?;
+    let runtime = build_runtime(&config, cli.fake_model).await?;
+    match cli.command {
+        Command::Run { input } => run(runtime, input).await,
+        Command::Serve {
+            host,
+            port,
+            web_dir,
+        } => {
+            serve(
+                runtime,
+                host.unwrap_or(config.server.host),
+                port.unwrap_or(config.server.port),
+                web_dir,
+            )
+            .await
+        }
+    }
+}
+
+async fn run(runtime: std::sync::Arc<AgentRuntime>, input: String) -> Result<()> {
+    let thread_id = ThreadId::new();
+    runtime.store().create_thread(thread_id.clone()).await?;
+    let turn_id = TurnId::new();
+    let cancellation = CancellationToken::new();
+    let (events, receiver) = broadcast::channel(256);
+    let renderer = tokio::spawn(render_events(runtime.clone(), receiver));
+    println!("> {input}\n");
+    let turn = runtime.run_turn(
+        thread_id,
+        turn_id,
+        input,
+        events.clone(),
+        cancellation.clone(),
+    );
+    tokio::pin!(turn);
+    let result = tokio::select! {
+        result = &mut turn => result,
+        signal = tokio::signal::ctrl_c() => {
+            signal.map_err(|error| OpsCodexError::Protocol(error.to_string()))?;
+            cancellation.cancel();
+            turn.await
+        }
+    };
+    drop(events);
+    let _ = renderer.await;
+    result
+}
+
+async fn render_events(
+    runtime: std::sync::Arc<AgentRuntime>,
+    mut receiver: broadcast::Receiver<EventEnvelope>,
+) {
+    let mut streaming = false;
+    while let Ok(envelope) = receiver.recv().await {
+        match envelope.event {
+            RuntimeEvent::AssistantDelta { delta } => {
+                print!("{delta}");
+                let _ = io::stdout().flush();
+                streaming = true;
+            }
+            RuntimeEvent::AssistantCompleted { .. } if streaming => {
+                println!("\n");
+                streaming = false;
+            }
+            RuntimeEvent::ToolStarted { tool, .. } => println!("[tool] {tool} running"),
+            RuntimeEvent::ToolCompleted {
+                tool,
+                evidence,
+                success,
+                ..
+            } => println!(
+                "[tool] {tool} {} ({} ms)",
+                if success { "completed" } else { "failed" },
+                evidence.duration_ms
+            ),
+            RuntimeEvent::ApprovalRequired {
+                approval_id,
+                tool,
+                arguments,
+            } => {
+                println!("[approval] {tool} {arguments}");
+                let approved = tokio::task::spawn_blocking(|| {
+                    print!("Allow? [y/N] ");
+                    let _ = io::stdout().flush();
+                    let mut answer = String::new();
+                    io::stdin().read_line(&mut answer).is_ok()
+                        && matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+                })
+                .await
+                .unwrap_or(false);
+                let _ = runtime.policy().broker().resolve(&approval_id, approved);
+            }
+            RuntimeEvent::TurnFailed { error } => eprintln!("turn failed: {error}"),
+            RuntimeEvent::TurnCancelled => eprintln!("turn cancelled"),
+            _ => {}
+        }
+    }
+}
+
+async fn serve(
+    runtime: std::sync::Arc<AgentRuntime>,
+    host: String,
+    port: u16,
+    web_directory: PathBuf,
+) -> Result<()> {
+    let address: SocketAddr = format!("{host}:{port}")
+        .parse()
+        .map_err(|error| OpsCodexError::Protocol(format!("invalid listen address: {error}")))?;
+    let listener = tokio::net::TcpListener::bind(address)
+        .await
+        .map_err(|error| OpsCodexError::Protocol(format!("failed to bind {address}: {error}")))?;
+    let actual = listener.local_addr().unwrap_or(address);
+    println!("OpsCodex listening on http://{actual}");
+    axum::serve(
+        listener,
+        router_with_web(ServerState::new(runtime), web_directory),
+    )
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await
+    .map_err(|error| OpsCodexError::Protocol(format!("server failed: {error}")))
+}

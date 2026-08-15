@@ -1,0 +1,27 @@
+[model]
+provider = "openai"
+model = "gpt-5.2"
+api_key_env = "OPENAI_API_KEY"
+endpoint = "https://api.openai.com/v1/responses"
+
+[runtime]
+max_steps = 12
+max_concurrent_turns = 4
+tool_timeout_seconds = 30
+model_timeout_seconds = 120
+max_output_bytes = 65536
+context_items = 100
+
+[prometheus]
+url = "http://localhost:9090"
+
+[targets]
+allowed_containers = ["order-service"]
+allowed_hosts = ["localhost", "127.0.0.1", "order-service"]
+
+[tools]
+exec = false
+
+[server]
+host = "127.0.0.1"
+port = 3000

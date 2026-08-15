@@ -1,0 +1,26 @@
+services:
+  order-service:
+    build:
+      context: ./order-service
+    container_name: order-service
+    init: true
+    environment:
+      ORDER_SERVICE_LATENCY_SECONDS: "2.4"
+      ORDER_SERVICE_MAX_IN_FLIGHT: "16"
+      ORDER_SERVICE_TRAFFIC_RPS: "2"
+    ports:
+      - "8080:8080"
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    container_name: prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+    depends_on:
+      order-service:
+        condition: service_healthy
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
