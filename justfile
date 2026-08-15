@@ -24,12 +24,15 @@ web-build:
 demo-test:
     python3 -m unittest discover -s demo/order-service/tests -v
 
+acceptance-test:
+    python3 -m unittest discover -s scripts/tests -v
+
 audit:
     cargo audit
     cargo deny --locked check advisories licenses bans sources
     cd web && npm audit --audit-level=high --registry=https://registry.npmjs.org
 
-test: rust-test web-test demo-test
+test: rust-test web-test demo-test acceptance-test
 
 check: fmt-check clippy test web-build
 

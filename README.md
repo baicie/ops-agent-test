@@ -185,6 +185,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
 cd web && npm test && npm run build
 python3 -m unittest discover -s demo/order-service/tests -v
+python3 -m unittest discover -s scripts/tests -v
 ```
 
 The full live-environment acceptance, release, and rollback procedure is in

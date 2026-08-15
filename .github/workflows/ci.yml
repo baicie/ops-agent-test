@@ -104,6 +104,9 @@ jobs:
       - name: Run demo tests
         run: python -m unittest discover -s demo/order-service/tests -v
 
+      - name: Run live acceptance verifier tests
+        run: python -m unittest discover -s scripts/tests -v
+
   demo-smoke:
     name: Demo containers
     runs-on: ubuntu-latest
