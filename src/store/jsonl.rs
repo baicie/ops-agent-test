@@ -490,5 +490,35 @@ fn encode_line(envelope: &EventEnvelope) -> Result<Vec<u8>> {
 }
 
 fn storage_io(action: &str, path: &std::path::Path, error: std::io::Error) -> OpsCodexError {
-    OpsCodexError::Storage(format!("failed to {action} {}: {error}", path.display()))
+    if is_disk_full_io(&error) {
+        OpsCodexError::Storage(format!(
+            "failed to {action} {}: disk is full; free space and retry ({error})",
+            path.display()
+        ))
+    } else {
+        OpsCodexError::Storage(format!("failed to {action} {}: {error}", path.display()))
+    }
+}
+
+fn is_disk_full_io(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::StorageFull
+        || error
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("no space left")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn disk_full_io_errors_ask_the_operator_to_free_space() {
+        let error = std::io::Error::new(std::io::ErrorKind::StorageFull, "No space left on device");
+        let mapped = storage_io("write", Path::new("/tmp/thread.jsonl"), error);
+        let text = mapped.to_string();
+        assert!(text.contains("disk is full"));
+        assert!(text.contains("free space"));
+    }
 }

@@ -74,5 +74,6 @@ Thread Fork 已经落地。崩溃分类由 `just continuity-test` 在 durable ch
 Kubernetes scale、kill switch 和 hash-chained Audit 已经落地。默认配置 mutation count 仍为 0；
 真实环境 gate 与受保护 cluster smoke 尚未作为发布门禁跑过，因此该阶段不能标为已发布。
 `v1.0` Production Readiness 正在实现中：doctor/verify/backup/audit CLI、`/readyz`、无 TLS 时
-非 loopback fail-closed、合同 fixture、运维文档和 release dry-run（校验和/SBOM）已经落地。
+非 loopback fail-closed、合同 fixture、运维文档、release dry-run（校验和/SBOM）、本地容量/
+配额 harness 和八类 deterministic 场景骨架已经落地。
 24h soak、真实 Provider gate 与 `v1.0.0` tag 尚未作为发布门禁跑过，因此该阶段不能标为已发布。

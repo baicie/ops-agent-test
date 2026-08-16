@@ -239,28 +239,28 @@ impl AgentRuntime {
         action_id: &ActionId,
         cancellation: CancellationToken,
     ) -> Result<ActionRecord> {
-        let mut action = self
-            .store
-            .get_action(action_id)
-            .await?
-            .ok_or_else(|| OpsCodexError::NotFound(format!("action {action_id}")))?;
-        self.expire_if_needed(&mut action).await?;
         if self.remediation.kill_switch_enabled() || !self.remediation.enabled {
             return Err(OpsCodexError::Policy(
                 "kill switch is blocking change operations".into(),
             ));
         }
-        if action.status != ActionStatus::Authorized || !action.consumed_approval {
-            return Err(OpsCodexError::Policy(
-                "action is not authorized for execution".into(),
-            ));
-        }
-        if action_request_hash(&action) != action.request_hash {
-            return Err(OpsCodexError::Policy(
-                "action changed after approval".into(),
-            ));
-        }
-        action.status = transition(action.status, ActionStatus::PreconditionCheck)?;
+        let Some(mut action) = self
+            .store
+            .claim_action_for_execution(action_id, Utc::now())
+            .await?
+        else {
+            let action = self
+                .store
+                .get_action(action_id)
+                .await?
+                .ok_or_else(|| OpsCodexError::NotFound(format!("action {action_id}")))?;
+            return Err(OpsCodexError::Policy(format!(
+                "action {} is {} and cannot be executed",
+                action.action_id,
+                action.status.as_str()
+            )));
+        };
+        self.emit_action(&action.thread_id, &action).await?;
         if let Err(error) = self
             .check_preconditions(&action, cancellation.clone())
             .await
@@ -275,7 +275,30 @@ impl AgentRuntime {
         action.updated_at = Utc::now();
         self.store.put_action(action.clone()).await?;
         self.emit_action(&action.thread_id, &action).await?;
-        let outcome = self.run_action(&action, false, cancellation).await?;
+        let outcome = match self.run_action(&action, false, cancellation).await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let message = format!("action runner failed after execution began: {error}");
+                action.status =
+                    transition(ActionStatus::Executing, ActionStatus::NeedsReconciliation)?;
+                action.updated_at = Utc::now();
+                self.store.put_action(action.clone()).await?;
+                self.audit(
+                    "action.needs_reconciliation",
+                    Some(action.workspace_id.as_str()),
+                    json!({
+                        "action_id": action.action_id,
+                        "status": action.status.as_str(),
+                        "request_hash": action.request_hash,
+                        "committed": Value::Null,
+                        "message": message,
+                    }),
+                )
+                .await?;
+                self.emit_action(&action.thread_id, &action).await?;
+                return Err(OpsCodexError::NeedsReconciliation(message));
+            }
+        };
         if outcome.committed {
             self.remediation
                 .mutation_count

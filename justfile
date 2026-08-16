@@ -33,6 +33,10 @@ remediation-test:
 ops-test:
     cargo test --locked --test ops --test contracts --test config --test scenario_eval
 
+capacity-test:
+    cargo test --locked --test capacity
+    cargo test --locked --lib disk_full
+
 acceptance-test:
     python3 -m unittest discover -s scripts/tests -v
 

@@ -101,3 +101,45 @@ fn topology_keeps_conflicting_edges_and_hides_stale_from_model_query() {
     );
     assert!(visible.edges.iter().any(|edge| edge.stale));
 }
+
+#[test]
+fn topology_projects_wrapped_trace_tool_output_from_the_agent_loop() {
+    let workspace = WorkspaceId::default();
+    let thread = ThreadId::new();
+    let mut trace = EventEnvelope::new(
+        2,
+        thread,
+        None,
+        RuntimeEvent::ToolCompleted {
+            call_id: "c1".into(),
+            tool: "trace_search".into(),
+            output: json!({
+                "success": true,
+                "evidence_id": "ev-1",
+                "summary": "1 traces",
+                "truncated": false,
+                "sha256": "abc",
+                "content": {
+                    "traces": [{
+                        "client": "order-service",
+                        "server": "payment-service"
+                    }]
+                }
+            }),
+            evidence: {
+                let mut meta = EvidenceMeta::new("tempo");
+                meta.evidence_id = Some(opscodex::runtime::EvidenceId::new());
+                meta
+            },
+            success: true,
+        },
+    );
+    trace.workspace_id = workspace.clone();
+    let graph = project_topology(&workspace, &[trace]);
+    assert!(
+        graph.edges.iter().any(|edge| {
+            edge.from.contains("order-service") && edge.to.contains("payment-service")
+        }),
+        "{graph:?}"
+    );
+}

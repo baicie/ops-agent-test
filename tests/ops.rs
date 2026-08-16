@@ -65,7 +65,7 @@ async fn doctor_reports_error_when_production_safe_enables_exec() -> anyhow::Res
 }
 
 #[tokio::test]
-async fn verify_backup_and_audit_round_trip_a_sqlite_store() -> anyhow::Result<()> {
+async fn online_backup_and_audit_round_trip_while_source_store_is_open() -> anyhow::Result<()> {
     let directory = tempdir()?;
     let sqlite = directory.path().join("state.sqlite3");
     let config = config_with_sqlite(&sqlite);
@@ -78,6 +78,11 @@ async fn verify_backup_and_audit_round_trip_a_sqlite_store() -> anyhow::Result<(
             opscodex::runtime::WorkspaceId::default(),
         )
         .await?;
+
+    let backup_dir = directory.path().join("backup");
+    let backup = ops::backup_store(&config, &backup_dir).await?;
+    assert!(backup.ends_with("state.sqlite3"));
+    assert_eq!(store.list_threads().await?.len(), 1);
     drop(store);
 
     let detail = ops::verify_store(&config).await?;
@@ -87,9 +92,6 @@ async fn verify_backup_and_audit_round_trip_a_sqlite_store() -> anyhow::Result<(
     let audit = ops::verify_audit(&config).await?;
     assert!(audit.contains("audit record"));
 
-    let backup_dir = directory.path().join("backup");
-    let backup = ops::backup_store(&config, &backup_dir).await?;
-    assert!(backup.ends_with("state.sqlite3"));
     let restored = SqliteStore::open(backup.clone()).await?;
     restored.integrity_check().await?;
     assert_eq!(restored.list_threads().await?.len(), 1);

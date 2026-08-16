@@ -10,6 +10,9 @@ use crate::{
 const DEFAULT_TTL_MINUTES: i64 = 30;
 const DEFAULT_DEPTH: usize = 2;
 const DEFAULT_MAX_NODES: usize = 32;
+const MAX_ARTIFACT_PROJECTION_ITEMS: usize = 16;
+const MAX_ARTIFACT_PROJECTION_STRING_BYTES: usize = 64;
+const MAX_ARTIFACT_PROJECTION_BYTES: usize = 8 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TopologyNode {
@@ -73,6 +76,7 @@ pub fn project_topology(workspace_id: &WorkspaceId, events: &[EventEnvelope]) ->
             if !success {
                 continue;
             }
+            let output = projection_payload(output);
             match tool.as_str() {
                 "k8s_get" => project_k8s_object(&mut graph, workspace_id, evidence, output, now),
                 "trace_search" | "trace_get" => {
@@ -193,6 +197,134 @@ pub fn query_topology(graph: TopologyGraph, query: TopologyQuery) -> TopologyGra
         .edges
         .retain(|edge| allowed.contains(&edge.from) && allowed.contains(&edge.to));
     graph
+}
+
+fn projection_payload(output: &Value) -> &Value {
+    if output.get("success").and_then(Value::as_bool) == Some(true) {
+        if let Some(content) = output.get("content") {
+            return content;
+        }
+        if let Some(projection) = output.get("topology_projection") {
+            return projection;
+        }
+    }
+    output
+}
+
+pub(crate) fn artifact_topology_projection(tool: &str, output: &Value) -> Option<Value> {
+    let projection = match tool {
+        "trace_search" | "trace_get" => trace_artifact_projection(output),
+        "k8s_get" => k8s_artifact_projection(output),
+        _ => None,
+    }?;
+    (serde_json::to_vec(&projection).ok()?.len() <= MAX_ARTIFACT_PROJECTION_BYTES)
+        .then_some(projection)
+}
+
+fn trace_artifact_projection(output: &Value) -> Option<Value> {
+    let traces: Vec<_> = output
+        .get("traces")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|trace| {
+            let mut projected = serde_json::Map::new();
+            for field in ["rootServiceName", "service", "client", "server"] {
+                if let Some(value) = trace.get(field).and_then(Value::as_str) {
+                    projected.insert(field.into(), Value::String(bounded_string(value)));
+                }
+            }
+            (!projected.is_empty()).then_some(Value::Object(projected))
+        })
+        .take(MAX_ARTIFACT_PROJECTION_ITEMS)
+        .collect();
+    let batches: Vec<_> = output
+        .get("batches")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|batch| {
+            batch
+                .pointer("/resource/service.name")
+                .and_then(Value::as_str)
+                .map(|service| {
+                    serde_json::json!({
+                        "resource": {"service.name": bounded_string(service)}
+                    })
+                })
+        })
+        .take(MAX_ARTIFACT_PROJECTION_ITEMS)
+        .collect();
+    if traces.is_empty() && batches.is_empty() {
+        return None;
+    }
+    let mut projection = serde_json::Map::new();
+    if !traces.is_empty() {
+        projection.insert("traces".into(), Value::Array(traces));
+    }
+    if !batches.is_empty() {
+        projection.insert("batches".into(), Value::Array(batches));
+    }
+    Some(Value::Object(projection))
+}
+
+fn k8s_artifact_projection(output: &Value) -> Option<Value> {
+    let object = output.get("object").unwrap_or(output);
+    let name = object
+        .pointer("/metadata/name")
+        .and_then(Value::as_str)
+        .or_else(|| output.get("name").and_then(Value::as_str))?;
+    let kind = object
+        .get("kind")
+        .and_then(Value::as_str)
+        .or_else(|| output.get("kind").and_then(Value::as_str))
+        .unwrap_or("Object");
+    let owners: Vec<_> = object
+        .pointer("/metadata/ownerReferences")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|owner| {
+            let owner_name = owner.get("name").and_then(Value::as_str)?;
+            Some(serde_json::json!({
+                "kind": bounded_string(
+                    owner.get("kind").and_then(Value::as_str).unwrap_or("Owner")
+                ),
+                "name": bounded_string(owner_name),
+            }))
+        })
+        .take(MAX_ARTIFACT_PROJECTION_ITEMS)
+        .collect();
+    let selector: serde_json::Map<String, Value> = object
+        .pointer("/spec/selector")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|selector| selector.iter())
+        .filter_map(|(key, value)| {
+            value
+                .as_str()
+                .map(|value| (bounded_string(key), Value::String(bounded_string(value))))
+        })
+        .take(MAX_ARTIFACT_PROJECTION_ITEMS)
+        .collect();
+    Some(serde_json::json!({
+        "object": {
+            "kind": bounded_string(kind),
+            "metadata": {
+                "name": bounded_string(name),
+                "ownerReferences": owners,
+            },
+            "spec": {"selector": selector},
+        }
+    }))
+}
+
+fn bounded_string(value: &str) -> String {
+    let mut end = value.len().min(MAX_ARTIFACT_PROJECTION_STRING_BYTES);
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
 }
 
 fn project_k8s_object(
@@ -454,5 +586,63 @@ fn source_rank(source: &str) -> u8 {
         "trace" => 3,
         "kubernetes" => 2,
         _ => 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn artifact_projection_is_bounded_and_keeps_trace_relationships() {
+        let long_name = "service".repeat(100);
+        let traces: Vec<_> = (0..100)
+            .map(|_| {
+                json!({
+                    "rootServiceName": long_name,
+                    "client": long_name,
+                    "server": long_name,
+                    "ignored": "x".repeat(10_000),
+                })
+            })
+            .collect();
+        let projection = artifact_topology_projection(
+            "trace_search",
+            &json!({"traces": traces, "ignored": "x".repeat(100_000)}),
+        )
+        .expect("trace projection");
+        assert_eq!(projection["traces"].as_array().unwrap().len(), 16);
+        assert!(
+            projection["traces"][0]["client"].as_str().unwrap().len()
+                <= MAX_ARTIFACT_PROJECTION_STRING_BYTES
+        );
+        assert!(serde_json::to_vec(&projection).unwrap().len() <= MAX_ARTIFACT_PROJECTION_BYTES);
+    }
+
+    #[test]
+    fn artifact_projection_keeps_kubernetes_ownership_and_selectors() {
+        let projection = artifact_topology_projection(
+            "k8s_get",
+            &json!({
+                "object": {
+                    "kind": "Service",
+                    "metadata": {
+                        "name": "orders",
+                        "ownerReferences": [{"kind": "Deployment", "name": "orders"}],
+                    },
+                    "spec": {"selector": {"app": "orders"}},
+                    "data": "x".repeat(100_000),
+                }
+            }),
+        )
+        .expect("kubernetes projection");
+        assert_eq!(projection["object"]["metadata"]["name"], "orders");
+        assert_eq!(
+            projection["object"]["metadata"]["ownerReferences"][0]["kind"],
+            "Deployment"
+        );
+        assert_eq!(projection["object"]["spec"]["selector"]["app"], "orders");
+        assert!(serde_json::to_vec(&projection).unwrap().len() <= MAX_ARTIFACT_PROJECTION_BYTES);
     }
 }

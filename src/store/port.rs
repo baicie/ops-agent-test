@@ -213,11 +213,25 @@ pub trait EventStore: Send + Sync {
         ))
     }
 
+    async fn claim_action_for_execution(
+        &self,
+        _action_id: &ActionId,
+        _now: DateTime<Utc>,
+    ) -> Result<Option<ActionRecord>> {
+        Err(OpsCodexError::Protocol(
+            "action execution requires the sqlite store".into(),
+        ))
+    }
+
     async fn list_actions_for_thread(&self, _thread_id: &ThreadId) -> Result<Vec<ActionRecord>> {
         Ok(Vec::new())
     }
 
     async fn list_awaiting_approval_actions(&self) -> Result<Vec<ActionRecord>> {
+        Ok(Vec::new())
+    }
+
+    async fn list_action_recovery_candidates(&self) -> Result<Vec<ActionRecord>> {
         Ok(Vec::new())
     }
 

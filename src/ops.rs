@@ -176,8 +176,7 @@ pub async fn verify_store(config: &Config) -> Result<String> {
     }
     let threads = store.list_threads().await?.len();
     Ok(format!(
-        "integrity ok; schema {:?}; {} thread(s)",
-        versions, threads
+        "integrity ok; schema {versions:?}; {threads} thread(s)"
     ))
 }
 
@@ -214,8 +213,7 @@ pub async fn backup_store(config: &Config, dest: impl AsRef<Path>) -> Result<Pat
     } else {
         dest.join("state.sqlite3")
     };
-    let store = SqliteStore::open(source).await?;
-    store.backup_to(file).await
+    SqliteStore::backup_path(source, file).await
 }
 
 fn ok(name: &str, detail: impl Into<String>) -> Check {

@@ -27,6 +27,11 @@ All notable changes to OpsCodex are documented in this file. The format follows
   and frozen `/api/v1` contract fixtures. `/healthz` is process liveness only.
 - Release dry-run manifest: SHA-256 checksums, CycloneDX SBOM from Cargo.lock and
   npm lockfile, and LICENSE check. It does not create a `v1.0.0` tag.
+- Local capacity harness: append/projection p95, four concurrent turns, artifact
+  and turn-input quota fail-closed, and synthetic disk-full error mapping. Real
+  OS disk exhaustion, zero-loss validation, and 24h soak are not release gates.
+- Deterministic scenarios for alert-driven error surge, latency regression with
+  topology, and downstream dependency failure.
 
 ### Documentation
 

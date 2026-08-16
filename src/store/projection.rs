@@ -1,5 +1,6 @@
 use crate::{
     OpsCodexError, Result,
+    action::ActionStatus,
     model::ModelItem,
     runtime::{EventEnvelope, Item, RuntimeEvent, Thread, ThreadId, ThreadStatus},
     store::ThreadSummary,
@@ -146,12 +147,16 @@ pub fn status_after(status: ThreadStatus, event: &RuntimeEvent) -> ThreadStatus 
         RuntimeEvent::ApprovalResolved { .. } | RuntimeEvent::TurnStarted => ThreadStatus::Running,
         RuntimeEvent::TurnCompleted | RuntimeEvent::TurnCancelled => ThreadStatus::Idle,
         RuntimeEvent::TurnFailed { .. } => ThreadStatus::Failed,
-        RuntimeEvent::ActionUpdated { status, .. } if status == "needs_reconciliation" => {
-            ThreadStatus::NeedsReconciliation
-        }
-        RuntimeEvent::ActionUpdated { status, .. } if status == "awaiting_approval" => {
-            ThreadStatus::WaitingApproval
-        }
+        RuntimeEvent::ActionUpdated {
+            status: action_status,
+            ..
+        } => match ActionStatus::parse(action_status) {
+            Ok(ActionStatus::AwaitingApproval) => ThreadStatus::WaitingApproval,
+            Ok(ActionStatus::NeedsReconciliation) => ThreadStatus::NeedsReconciliation,
+            Ok(action_status) if action_status.is_terminal() => ThreadStatus::Idle,
+            Ok(_) => ThreadStatus::Running,
+            Err(_) => status,
+        },
         _ => status,
     }
 }
@@ -262,5 +267,75 @@ fn apply_event(items: &mut Vec<Item>, status: &mut ThreadStatus, envelope: &Even
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::{ActionId, PlanId};
+
+    fn action_updated(status: &str) -> RuntimeEvent {
+        RuntimeEvent::ActionUpdated {
+            action_id: ActionId::new(),
+            plan_id: PlanId::new(),
+            status: status.to_owned(),
+            tool: "test_tool".into(),
+            request_hash: "request-hash".into(),
+            review: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn active_action_statuses_clear_waiting_approval_to_running() {
+        for status in [
+            "proposed",
+            "dry_run",
+            "authorized",
+            "precondition_check",
+            "executing",
+            "verifying",
+            "verification_failed",
+        ] {
+            assert_eq!(
+                status_after(ThreadStatus::WaitingApproval, &action_updated(status)),
+                ThreadStatus::Running,
+                "action status {status}"
+            );
+        }
+    }
+
+    #[test]
+    fn terminal_action_statuses_clear_waiting_approval_to_idle() {
+        for status in [
+            "policy_denied",
+            "invalid",
+            "expired",
+            "rejected",
+            "stale",
+            "succeeded",
+            "rollback_proposed",
+        ] {
+            assert_eq!(
+                status_after(ThreadStatus::WaitingApproval, &action_updated(status)),
+                ThreadStatus::Idle,
+                "action status {status}"
+            );
+        }
+    }
+
+    #[test]
+    fn exceptional_action_statuses_have_dedicated_thread_states() {
+        assert_eq!(
+            status_after(ThreadStatus::Running, &action_updated("awaiting_approval")),
+            ThreadStatus::WaitingApproval
+        );
+        assert_eq!(
+            status_after(
+                ThreadStatus::WaitingApproval,
+                &action_updated("needs_reconciliation")
+            ),
+            ThreadStatus::NeedsReconciliation
+        );
     }
 }

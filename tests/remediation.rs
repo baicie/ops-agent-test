@@ -1,6 +1,9 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -23,6 +26,7 @@ use opscodex::{
 use serde_json::{Value, json};
 use tempfile::tempdir;
 use tokio::net::TcpListener;
+use tokio::sync::Barrier;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
@@ -61,6 +65,17 @@ async fn runtime_with(
 ) -> anyhow::Result<(AgentRuntime, Arc<SqliteStore>, tempfile::TempDir)> {
     let directory = tempdir()?;
     let store = Arc::new(SqliteStore::open(directory.path().join("state.sqlite3")).await?);
+    let runtime = runtime_from_store(enabled, demo_url, kube, catalog, store.clone());
+    Ok((runtime, store, directory))
+}
+
+fn runtime_from_store(
+    enabled: bool,
+    demo_url: &str,
+    kube: HashMap<String, Arc<KubernetesClient>>,
+    catalog: WorkspaceCatalog,
+    store: Arc<SqliteStore>,
+) -> AgentRuntime {
     let remediation = RemediationRuntime::new(
         enabled,
         false,
@@ -70,7 +85,7 @@ async fn runtime_with(
         kube,
         Duration::from_secs(1800),
     );
-    let runtime = AgentRuntime::new(
+    AgentRuntime::new(
         Arc::new(FakeModelProvider::new(vec![])),
         ToolRegistry::new(),
         PolicyEngine::new(Arc::new(ApprovalBroker::new())),
@@ -78,8 +93,7 @@ async fn runtime_with(
         RuntimeConfig::default(),
     )
     .with_workspaces(catalog, HashMap::new())
-    .with_remediation(remediation);
-    Ok((runtime, store, directory))
+    .with_remediation(remediation)
 }
 
 async fn open_thread(store: &SqliteStore, workspace: &str) -> anyhow::Result<ThreadId> {
@@ -188,6 +202,248 @@ async fn demo_fault_reset_plan_approve_execute_verify() -> anyhow::Result<()> {
     assert_eq!(runtime.mutation_count(), 1);
     assert_eq!(mode.lock().unwrap().as_str(), "normal");
     runtime.verify_audit_log().await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_execute_calls_claim_an_authorized_action_once() -> anyhow::Result<()> {
+    let resets = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route("/health", get(healthy_demo))
+        .route("/debug/fault/normal", post(counted_demo_reset))
+        .with_state(resets.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let (runtime, store, _directory) = runtime_with(
+        true,
+        &format!("http://{address}"),
+        HashMap::new(),
+        demo_catalog(),
+    )
+    .await?;
+    let thread_id = open_thread(&store, "local-demo").await?;
+    let action = runtime
+        .propose_action_plan(
+            &thread_id,
+            "demo_fault_reset",
+            json!({"service": "order-service", "mode": "normal"}),
+            Vec::new(),
+            CancellationToken::new(),
+        )
+        .await?;
+    let authorized = runtime
+        .approve_action(&action.action_id, &action.request_hash, true)
+        .await?;
+    let runtime = Arc::new(runtime);
+    let barrier = Arc::new(Barrier::new(3));
+
+    let first = tokio::spawn({
+        let runtime = runtime.clone();
+        let barrier = barrier.clone();
+        let action_id = authorized.action_id.clone();
+        async move {
+            barrier.wait().await;
+            runtime
+                .execute_action(&action_id, CancellationToken::new())
+                .await
+        }
+    });
+    let second = tokio::spawn({
+        let runtime = runtime.clone();
+        let barrier = barrier.clone();
+        let action_id = authorized.action_id.clone();
+        async move {
+            barrier.wait().await;
+            runtime
+                .execute_action(&action_id, CancellationToken::new())
+                .await
+        }
+    });
+    barrier.wait().await;
+
+    let results = [first.await?, second.await?];
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(results.iter().filter(|result| result.is_err()).count(), 1);
+    assert_eq!(resets.load(Ordering::SeqCst), 1);
+    assert_eq!(runtime.mutation_count(), 1);
+    assert_eq!(
+        store
+            .get_action(&authorized.action_id)
+            .await?
+            .unwrap()
+            .status,
+        ActionStatus::Succeeded
+    );
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn authorized_action_expiry_is_persisted_before_execution() -> anyhow::Result<()> {
+    let resets = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route("/health", get(healthy_demo))
+        .route("/debug/fault/normal", post(counted_demo_reset))
+        .with_state(resets.clone());
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let (runtime, store, _directory) = runtime_with(
+        true,
+        &format!("http://{address}"),
+        HashMap::new(),
+        demo_catalog(),
+    )
+    .await?;
+    let thread_id = open_thread(&store, "local-demo").await?;
+    let action = runtime
+        .propose_action_plan(
+            &thread_id,
+            "demo_fault_reset",
+            json!({"service": "order-service", "mode": "normal"}),
+            Vec::new(),
+            CancellationToken::new(),
+        )
+        .await?;
+    let mut authorized = runtime
+        .approve_action(&action.action_id, &action.request_hash, true)
+        .await?;
+    authorized.expires_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+    store.put_action(authorized.clone()).await?;
+
+    let error = runtime
+        .execute_action(&authorized.action_id, CancellationToken::new())
+        .await
+        .unwrap_err();
+
+    assert!(error.to_string().contains("expired"));
+    assert_eq!(
+        store
+            .get_action(&authorized.action_id)
+            .await?
+            .unwrap()
+            .status,
+        ActionStatus::Expired
+    );
+    assert_eq!(resets.load(Ordering::SeqCst), 0);
+    assert_eq!(runtime.mutation_count(), 0);
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn runner_error_after_execution_starts_requires_reconciliation() -> anyhow::Result<()> {
+    let app = Router::new()
+        .route("/health", get(healthy_demo_without_state))
+        .route("/debug/fault/normal", post(failing_demo_reset));
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let (runtime, store, _directory) = runtime_with(
+        true,
+        &format!("http://{address}"),
+        HashMap::new(),
+        demo_catalog(),
+    )
+    .await?;
+    let thread_id = open_thread(&store, "local-demo").await?;
+    let action = runtime
+        .propose_action_plan(
+            &thread_id,
+            "demo_fault_reset",
+            json!({"service": "order-service", "mode": "normal"}),
+            Vec::new(),
+            CancellationToken::new(),
+        )
+        .await?;
+    let authorized = runtime
+        .approve_action(&action.action_id, &action.request_hash, true)
+        .await?;
+
+    let error = runtime
+        .execute_action(&authorized.action_id, CancellationToken::new())
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        opscodex::OpsCodexError::NeedsReconciliation(_)
+    ));
+    assert_eq!(
+        store
+            .get_action(&authorized.action_id)
+            .await?
+            .unwrap()
+            .status,
+        ActionStatus::NeedsReconciliation
+    );
+    assert_eq!(runtime.mutation_count(), 0);
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn recovery_marks_in_flight_actions_for_reconciliation() -> anyhow::Result<()> {
+    let app = Router::new()
+        .route("/health", get(healthy_demo_without_state))
+        .route("/debug/fault/normal", post(successful_demo_reset));
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let (runtime, store, directory) = runtime_with(
+        true,
+        &format!("http://{address}"),
+        HashMap::new(),
+        demo_catalog(),
+    )
+    .await?;
+    let thread_id = open_thread(&store, "local-demo").await?;
+    let mut interrupted = Vec::new();
+    for status in [
+        ActionStatus::PreconditionCheck,
+        ActionStatus::Executing,
+        ActionStatus::Verifying,
+    ] {
+        let mut action = runtime
+            .propose_action_plan(
+                &thread_id,
+                "demo_fault_reset",
+                json!({"service": "order-service", "mode": "normal"}),
+                Vec::new(),
+                CancellationToken::new(),
+            )
+            .await?;
+        action.status = status;
+        action.consumed_approval = true;
+        store.put_action(action.clone()).await?;
+        interrupted.push(action.action_id);
+    }
+
+    drop(runtime);
+    drop(store);
+    let restarted_store =
+        Arc::new(SqliteStore::open(directory.path().join("state.sqlite3")).await?);
+    let restarted = runtime_from_store(
+        true,
+        &format!("http://{address}"),
+        HashMap::new(),
+        demo_catalog(),
+        restarted_store.clone(),
+    );
+    restarted.recover().await?;
+
+    for action_id in interrupted {
+        assert_eq!(
+            restarted_store
+                .get_action(&action_id)
+                .await?
+                .unwrap()
+                .status,
+            ActionStatus::NeedsReconciliation
+        );
+    }
     server.abort();
     Ok(())
 }
@@ -427,6 +683,30 @@ async fn approve_api_requires_the_displayed_request_hash() -> anyhow::Result<()>
     assert_eq!(missing_hash.status(), axum::http::StatusCode::BAD_REQUEST);
     server.abort();
     Ok(())
+}
+
+async fn healthy_demo(State(_resets): State<Arc<AtomicUsize>>) -> Json<Value> {
+    healthy_demo_without_state().await
+}
+
+async fn counted_demo_reset(State(resets): State<Arc<AtomicUsize>>) -> Json<Value> {
+    resets.fetch_add(1, Ordering::SeqCst);
+    Json(json!({"mode": "normal"}))
+}
+
+async fn healthy_demo_without_state() -> Json<Value> {
+    Json(json!({"status": "ok", "mode": "normal"}))
+}
+
+async fn successful_demo_reset() -> Json<Value> {
+    Json(json!({"mode": "normal"}))
+}
+
+async fn failing_demo_reset() -> (axum::http::StatusCode, Json<Value>) {
+    (
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({"error": "reset failed"})),
+    )
 }
 
 async fn demo_health(State(mode): State<Arc<Mutex<String>>>) -> Json<Value> {

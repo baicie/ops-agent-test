@@ -30,6 +30,7 @@ use crate::{
     },
     telemetry::RuntimeMetrics,
     tools::{ToolInvocation, ToolOutput, ToolRegistry},
+    topology::artifact_topology_projection,
     workspace::WorkspaceCatalog,
 };
 
@@ -69,6 +70,7 @@ observed and inferred claims must cite evidence_id values from tool results.
 "#;
 
 const INLINE_ARTIFACT_BYTES: usize = 8 * 1024;
+const MAX_TURN_INPUT_BYTES: usize = 32 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
@@ -286,30 +288,39 @@ impl AgentRuntime {
                 self.store.put_approval(approval).await?;
             }
         }
-        for mut action in self.store.list_awaiting_approval_actions().await? {
-            if action.expires_at <= now {
-                action.status = crate::action::transition(
-                    crate::action::ActionStatus::AwaitingApproval,
-                    crate::action::ActionStatus::Expired,
-                )?;
-                action.updated_at = Utc::now();
-                self.store.put_action(action.clone()).await?;
-                let _ = self
-                    .store
-                    .append(
-                        &action.thread_id,
-                        None,
-                        RuntimeEvent::ActionUpdated {
-                            action_id: action.action_id.clone(),
-                            plan_id: action.plan_id.clone(),
-                            status: action.status.as_str().to_owned(),
-                            tool: action.tool_id.clone(),
-                            request_hash: action.request_hash.clone(),
-                            review: action.review_summary(),
-                        },
-                    )
-                    .await;
-            }
+        for mut action in self.store.list_action_recovery_candidates().await? {
+            let next = match action.status {
+                crate::action::ActionStatus::AwaitingApproval
+                | crate::action::ActionStatus::Authorized
+                    if action.expires_at <= now =>
+                {
+                    crate::action::ActionStatus::Expired
+                }
+                crate::action::ActionStatus::PreconditionCheck
+                | crate::action::ActionStatus::Executing
+                | crate::action::ActionStatus::Verifying => {
+                    crate::action::ActionStatus::NeedsReconciliation
+                }
+                _ => continue,
+            };
+            action.status = crate::action::transition(action.status, next)?;
+            action.updated_at = now;
+            self.store.put_action(action.clone()).await?;
+            let _ = self
+                .store
+                .append(
+                    &action.thread_id,
+                    None,
+                    RuntimeEvent::ActionUpdated {
+                        action_id: action.action_id.clone(),
+                        plan_id: action.plan_id.clone(),
+                        status: action.status.as_str().to_owned(),
+                        tool: action.tool_id.clone(),
+                        request_hash: action.request_hash.clone(),
+                        review: action.review_summary(),
+                    },
+                )
+                .await;
         }
         let mut reports = Vec::new();
         for turn in self.store.list_open_turns().await? {
@@ -477,6 +488,21 @@ impl AgentRuntime {
         events: broadcast::Sender<EventEnvelope>,
         cancellation: CancellationToken,
     ) -> Result<()> {
+        if let Some(context) = &input.incident_context {
+            context.validate()?;
+        }
+        if input.content.len() > MAX_TURN_INPUT_BYTES {
+            return Err(OpsCodexError::Protocol(format!(
+                "turn input exceeds {MAX_TURN_INPUT_BYTES} bytes; shorten the prompt"
+            )));
+        }
+        if input.content.len() > self.config.context.max_bytes {
+            return Err(OpsCodexError::Protocol(format!(
+                "turn input exceeds context budget ({} bytes > {} bytes); shorten the prompt or raise runtime.context_max_bytes",
+                input.content.len(),
+                self.config.context.max_bytes
+            )));
+        }
         let turn_started = Instant::now();
         RuntimeMetrics::inc(&self.metrics.turns_started);
         let result = async {
@@ -1274,6 +1300,11 @@ impl AgentRuntime {
                 },
             );
             model_content = model_tool_output(true, &evidence, &content);
+            if evidence.artifact_ref.is_some()
+                && let Some(projection) = artifact_topology_projection(&name, &content)
+            {
+                model_content["topology_projection"] = projection;
+            }
         }
         let event_id = self
             .emit(

@@ -107,10 +107,16 @@ impl ActionStatus {
                     Self::AwaitingApproval,
                     Self::Expired | Self::Rejected | Self::Authorized
                 )
-                | (Self::Authorized, Self::PreconditionCheck)
-                | (Self::PreconditionCheck, Self::Stale | Self::Executing)
+                | (Self::Authorized, Self::Expired | Self::PreconditionCheck)
+                | (
+                    Self::PreconditionCheck,
+                    Self::Stale | Self::Executing | Self::NeedsReconciliation
+                )
                 | (Self::Executing, Self::Verifying | Self::NeedsReconciliation)
-                | (Self::Verifying, Self::Succeeded | Self::VerificationFailed)
+                | (
+                    Self::Verifying,
+                    Self::Succeeded | Self::VerificationFailed | Self::NeedsReconciliation
+                )
                 | (Self::VerificationFailed, Self::RollbackProposed)
         )
     }
@@ -190,18 +196,33 @@ impl ActionRecord {
 }
 
 pub fn action_request_hash(action: &ActionRecord) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(action.workspace_id.as_str().as_bytes());
-    hasher.update(action.tool_id.as_bytes());
-    hasher.update(action.tool_version.as_bytes());
-    hasher.update(action.schema_hash.as_bytes());
-    hasher.update(action.normalized_target.as_bytes());
-    hasher.update(serde_json::to_vec(&action.normalized_parameters).unwrap_or_default());
-    hasher.update(action.preconditions.join("\n").as_bytes());
-    hasher.update(action.verification_spec.as_bytes());
-    hasher.update(action.effect.as_bytes());
-    hasher.update(action.operation_id.as_bytes());
-    hasher.update(action.expires_at.to_rfc3339().as_bytes());
+    let parameters = serde_json::to_vec(&action.normalized_parameters)
+        .expect("serializing a serde_json::Value is infallible");
+    let expires_at = action.expires_at.to_rfc3339();
+    let mut hasher = canonical_hasher(b"action-request");
+    update_hash_field(
+        &mut hasher,
+        b"workspace_id",
+        action.workspace_id.as_str().as_bytes(),
+    );
+    update_hash_field(&mut hasher, b"tool_id", action.tool_id.as_bytes());
+    update_hash_field(&mut hasher, b"tool_version", action.tool_version.as_bytes());
+    update_hash_field(&mut hasher, b"schema_hash", action.schema_hash.as_bytes());
+    update_hash_field(
+        &mut hasher,
+        b"normalized_target",
+        action.normalized_target.as_bytes(),
+    );
+    update_hash_field(&mut hasher, b"normalized_parameters", &parameters);
+    update_hash_string_list(&mut hasher, b"preconditions", &action.preconditions);
+    update_hash_field(
+        &mut hasher,
+        b"verification_spec",
+        action.verification_spec.as_bytes(),
+    );
+    update_hash_field(&mut hasher, b"effect", action.effect.as_bytes());
+    update_hash_field(&mut hasher, b"operation_id", action.operation_id.as_bytes());
+    update_hash_field(&mut hasher, b"expires_at", expires_at.as_bytes());
     hex(hasher.finalize().as_slice())
 }
 
@@ -252,14 +273,59 @@ pub fn audit_record_hash(
     summary: &Value,
     created_at: DateTime<Utc>,
 ) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(previous_hash.as_bytes());
-    hasher.update(actor.as_bytes());
-    hasher.update(workspace_id.unwrap_or_default().as_bytes());
-    hasher.update(operation.as_bytes());
-    hasher.update(serde_json::to_vec(summary).unwrap_or_default());
-    hasher.update(created_at.to_rfc3339().as_bytes());
+    let summary =
+        serde_json::to_vec(summary).expect("serializing a serde_json::Value is infallible");
+    let created_at = created_at.to_rfc3339();
+    let mut hasher = canonical_hasher(b"audit-record");
+    update_hash_field(&mut hasher, b"previous_hash", previous_hash.as_bytes());
+    update_hash_field(&mut hasher, b"actor", actor.as_bytes());
+    update_optional_hash_field(
+        &mut hasher,
+        b"workspace_id",
+        workspace_id.map(str::as_bytes),
+    );
+    update_hash_field(&mut hasher, b"operation", operation.as_bytes());
+    update_hash_field(&mut hasher, b"summary", &summary);
+    update_hash_field(&mut hasher, b"created_at", created_at.as_bytes());
     hex(hasher.finalize().as_slice())
+}
+
+fn canonical_hasher(domain: &[u8]) -> Sha256 {
+    let mut hasher = Sha256::new();
+    hasher.update(b"opscodex/hash-preimage/v1");
+    update_length_prefixed(&mut hasher, domain);
+    hasher
+}
+
+fn update_hash_field(hasher: &mut Sha256, name: &[u8], value: &[u8]) {
+    update_length_prefixed(hasher, name);
+    update_length_prefixed(hasher, value);
+}
+
+fn update_hash_string_list(hasher: &mut Sha256, name: &[u8], values: &[String]) {
+    update_length_prefixed(hasher, name);
+    let count = u64::try_from(values.len()).expect("a field list length fits into u64");
+    hasher.update(count.to_be_bytes());
+    for value in values {
+        update_length_prefixed(hasher, value.as_bytes());
+    }
+}
+
+fn update_optional_hash_field(hasher: &mut Sha256, name: &[u8], value: Option<&[u8]>) {
+    update_length_prefixed(hasher, name);
+    match value {
+        Some(value) => {
+            hasher.update([1]);
+            update_length_prefixed(hasher, value);
+        }
+        None => hasher.update([0]),
+    }
+}
+
+fn update_length_prefixed(hasher: &mut Sha256, value: &[u8]) {
+    let length = u64::try_from(value.len()).expect("an in-memory field length fits into u64");
+    hasher.update(length.to_be_bytes());
+    hasher.update(value);
 }
 
 pub fn verify_audit_chain(records: &[AuditRecord]) -> Result<()> {
@@ -354,6 +420,18 @@ mod tests {
         let original = action_request_hash(&action);
         action.normalized_parameters = serde_json::json!({"service": "other", "mode": "normal"});
         assert_ne!(original, action_request_hash(&action));
+    }
+
+    #[test]
+    fn request_hash_distinguishes_adjacent_field_boundaries() {
+        let mut left = sample_action();
+        left.tool_id = "ab".into();
+        left.tool_version = "c".into();
+        let mut right = left.clone();
+        right.tool_id = "a".into();
+        right.tool_version = "bc".into();
+
+        assert_ne!(action_request_hash(&left), action_request_hash(&right));
     }
 
     fn sample_action() -> ActionRecord {
@@ -451,6 +529,17 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("hash")
+        );
+    }
+
+    #[test]
+    fn audit_hash_distinguishes_adjacent_field_boundaries() {
+        let created = Utc::now();
+        let summary = serde_json::json!({"action_id": "a1"});
+
+        assert_ne!(
+            audit_record_hash("genesis", "ab", Some("c"), "operation", &summary, created),
+            audit_record_hash("genesis", "a", Some("bc"), "operation", &summary, created)
         );
     }
 }

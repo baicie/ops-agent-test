@@ -267,6 +267,7 @@ just web-dev
 just serve-fake
 just demo-test
 just ops-test
+just capacity-test
 just release-dry-run
 ```
 

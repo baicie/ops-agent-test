@@ -46,6 +46,9 @@ just serve-fake
 # 运维命令、合同与场景
 just ops-test
 
+# 本地容量/配额（不含 24h soak）
+just capacity-test
+
 # Demo 启停
 just demo-up
 just demo-down

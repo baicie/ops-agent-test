@@ -6,12 +6,15 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 
 use crate::{
     OpsCodexError, Result,
-    action::{ActionPlan, ActionRecord, AuditRecord, audit_record_hash},
+    action::{
+        ActionPlan, ActionRecord, ActionStatus, AuditRecord, action_request_hash,
+        audit_record_hash, transition,
+    },
     evidence::EvidenceMeta,
     model::ModelItem,
     runtime::{
@@ -243,28 +246,31 @@ impl SqliteStore {
 
     pub async fn backup_to(&self, dest: impl Into<PathBuf>) -> Result<PathBuf> {
         let dest = dest.into();
-        if let Some(parent) = dest.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|error| {
-                OpsCodexError::Storage(format!(
-                    "failed to create backup directory {}: {error}",
-                    parent.display()
-                ))
-            })?;
-        }
-        if dest.exists() {
-            return Err(OpsCodexError::Storage(format!(
-                "backup path {} already exists",
-                dest.display()
-            )));
-        }
-        let dest_display = dest.display().to_string();
-        self.with_conn(move |conn| {
-            conn.execute("VACUUM INTO ?1", params![dest_display])
-                .map_err(|error| sqlite_error("vacuum into", error))?;
-            Ok(())
-        })
-        .await?;
+        prepare_backup_destination(&dest).await?;
+        let backup_path = dest.clone();
+        self.with_conn(move |conn| vacuum_into(conn, &backup_path))
+            .await?;
         Ok(dest)
+    }
+
+    pub async fn backup_path(
+        source: impl Into<PathBuf>,
+        dest: impl Into<PathBuf>,
+    ) -> Result<PathBuf> {
+        let source = source.into();
+        let dest = dest.into();
+        prepare_backup_destination(&dest).await?;
+        tokio::task::spawn_blocking(move || {
+            let conn =
+                Connection::open_with_flags(&source, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .map_err(|error| sqlite_error("open backup source", error))?;
+            conn.busy_timeout(Duration::from_millis(5_000))
+                .map_err(|error| sqlite_error("backup busy_timeout", error))?;
+            vacuum_into(&conn, &dest)?;
+            Ok(dest)
+        })
+        .await
+        .map_err(|error| OpsCodexError::Storage(format!("sqlite backup join failed: {error}")))?
     }
 
     async fn with_conn<T, F>(&self, function: F) -> Result<T>
@@ -340,6 +346,31 @@ impl SqliteStore {
     pub async fn summarize_thread(&self, thread_id: &ThreadId) -> Result<ThreadSummary> {
         Ok(summary_from_thread(self.get_thread(thread_id).await?))
     }
+}
+
+async fn prepare_backup_destination(dest: &Path) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|error| {
+            OpsCodexError::Storage(format!(
+                "failed to create backup directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    if dest.exists() {
+        return Err(OpsCodexError::Storage(format!(
+            "backup path {} already exists",
+            dest.display()
+        )));
+    }
+    Ok(())
+}
+
+fn vacuum_into(conn: &Connection, dest: &Path) -> Result<()> {
+    let dest_display = dest.display().to_string();
+    conn.execute("VACUUM INTO ?1", params![dest_display])
+        .map_err(|error| sqlite_error("vacuum into", error))?;
+    Ok(())
 }
 
 fn open_blocking(path: PathBuf) -> Result<SqliteStore> {
@@ -967,7 +998,28 @@ fn parse_turn_status(value: &str) -> TurnStatus {
 }
 
 fn sqlite_error(action: &str, error: rusqlite::Error) -> OpsCodexError {
-    OpsCodexError::Storage(format!("sqlite {action} failed: {error}"))
+    if is_sqlite_disk_full(&error) {
+        OpsCodexError::Storage(format!(
+            "sqlite {action} failed: disk is full; free space and retry ({error})"
+        ))
+    } else {
+        OpsCodexError::Storage(format!("sqlite {action} failed: {error}"))
+    }
+}
+
+fn is_sqlite_disk_full(error: &rusqlite::Error) -> bool {
+    match error {
+        rusqlite::Error::SqliteFailure(ffi_error, _)
+            if ffi_error.code == rusqlite::ErrorCode::DiskFull
+                || ffi_error.extended_code == rusqlite::ffi::SQLITE_FULL =>
+        {
+            true
+        }
+        _ => error
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("database or disk is full"),
+    }
 }
 
 fn upsert_turn(conn: &Connection, record: TurnRecord) -> Result<()> {
@@ -1450,6 +1502,70 @@ fn get_action(conn: &Connection, action_id: &ActionId) -> Result<Option<ActionRe
     .transpose()
 }
 
+fn claim_action_for_execution(
+    conn: &mut Connection,
+    action_id: &ActionId,
+    now: DateTime<Utc>,
+) -> Result<Option<ActionRecord>> {
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| sqlite_error("begin action claim", error))?;
+    let Some(mut action) = get_action(&tx, action_id)? else {
+        return Err(OpsCodexError::NotFound(format!("action {action_id}")));
+    };
+    if action.status != ActionStatus::Authorized {
+        return Ok(None);
+    }
+    if action.expires_at <= now {
+        action.status = transition(ActionStatus::Authorized, ActionStatus::Expired)?;
+        action.updated_at = now;
+        update_action_status_cas(&tx, &action, ActionStatus::Authorized)?;
+        tx.commit()
+            .map_err(|error| sqlite_error("commit expired action", error))?;
+        return Ok(None);
+    }
+    if !action.consumed_approval {
+        return Ok(None);
+    }
+    if action_request_hash(&action) != action.request_hash {
+        return Err(OpsCodexError::Policy(
+            "action changed after approval".into(),
+        ));
+    }
+    action.status = transition(ActionStatus::Authorized, ActionStatus::PreconditionCheck)?;
+    action.updated_at = now;
+    let claimed = update_action_status_cas(&tx, &action, ActionStatus::Authorized)?;
+    tx.commit()
+        .map_err(|error| sqlite_error("commit action claim", error))?;
+    Ok(claimed.then_some(action))
+}
+
+fn update_action_status_cas(
+    conn: &Connection,
+    action: &ActionRecord,
+    expected: ActionStatus,
+) -> Result<bool> {
+    let payload = serde_json::to_string(action)
+        .map_err(|error| OpsCodexError::Storage(format!("failed to encode action: {error}")))?;
+    let updated = conn
+        .execute(
+            "UPDATE actions
+             SET status = ?2, request_hash = ?3, consumed_approval = ?4, payload = ?5, updated_at = ?6
+             WHERE action_id = ?1 AND status = ?7",
+            params![
+                action.action_id.to_string(),
+                action.status.as_str(),
+                action.request_hash,
+                i64::from(action.consumed_approval),
+                payload,
+                action.updated_at.to_rfc3339(),
+                expected.as_str()
+            ],
+        )
+        .map_err(|error| sqlite_error("compare-and-swap action status", error))?;
+    Ok(updated == 1)
+}
+
 fn list_actions_for_thread(conn: &Connection, thread_id: &ThreadId) -> Result<Vec<ActionRecord>> {
     let mut statement = conn
         .prepare("SELECT payload FROM actions WHERE thread_id = ?1 ORDER BY updated_at ASC")
@@ -1479,6 +1595,25 @@ fn list_awaiting_approval_actions(conn: &Connection) -> Result<Vec<ActionRecord>
     for row in rows {
         actions.push(decode_action(row.map_err(|error| {
             sqlite_error("list awaiting actions row", error)
+        })?)?);
+    }
+    Ok(actions)
+}
+
+fn list_action_recovery_candidates(conn: &Connection) -> Result<Vec<ActionRecord>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT payload FROM actions
+             WHERE status IN ('awaiting_approval', 'authorized', 'precondition_check', 'executing', 'verifying')",
+        )
+        .map_err(|error| sqlite_error("list action recovery candidates", error))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| sqlite_error("list action recovery candidates query", error))?;
+    let mut actions = Vec::new();
+    for row in rows {
+        actions.push(decode_action(row.map_err(|error| {
+            sqlite_error("list action recovery candidates row", error)
         })?)?);
     }
     Ok(actions)
@@ -1837,6 +1972,16 @@ impl EventStore for SqliteStore {
         self.with_conn(move |conn| put_action(conn, action)).await
     }
 
+    async fn claim_action_for_execution(
+        &self,
+        action_id: &ActionId,
+        now: DateTime<Utc>,
+    ) -> Result<Option<ActionRecord>> {
+        let action_id = action_id.clone();
+        self.with_conn(move |conn| claim_action_for_execution(conn, &action_id, now))
+            .await
+    }
+
     async fn list_actions_for_thread(&self, thread_id: &ThreadId) -> Result<Vec<ActionRecord>> {
         let thread_id = thread_id.clone();
         self.with_conn(move |conn| list_actions_for_thread(conn, &thread_id))
@@ -1845,6 +1990,11 @@ impl EventStore for SqliteStore {
 
     async fn list_awaiting_approval_actions(&self) -> Result<Vec<ActionRecord>> {
         self.with_conn(|conn| list_awaiting_approval_actions(conn))
+            .await
+    }
+
+    async fn list_action_recovery_candidates(&self) -> Result<Vec<ActionRecord>> {
+        self.with_conn(|conn| list_action_recovery_candidates(conn))
             .await
     }
 
@@ -1971,5 +2121,20 @@ mod tests {
         let error =
             crate::action::verify_audit_chain(&store.list_audit().await.unwrap()).unwrap_err();
         assert!(error.to_string().contains("hash"));
+    }
+
+    #[test]
+    fn disk_full_errors_ask_the_operator_to_free_space() {
+        let error = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::DiskFull,
+                extended_code: rusqlite::ffi::SQLITE_FULL,
+            },
+            Some("database or disk is full".into()),
+        );
+        let mapped = sqlite_error("append", error);
+        let text = mapped.to_string();
+        assert!(text.contains("disk is full"));
+        assert!(text.contains("free space"));
     }
 }

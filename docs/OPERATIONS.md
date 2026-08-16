@@ -140,6 +140,16 @@ JSONL 回滚：保留 `threads/backup-<timestamp>/`，将 `[store] backend = "js
 - `exec`、MCP、Custom Tool 不能作为 remediation。
 - 无认证时禁止非 loopback 绑定。
 
+## 容量与配额
+
+本地 command/projection p95 目标是 100ms；默认最多 4 个并发 Turn。单次 Turn 输入超过
+32 KiB 或超过 `runtime.context_max_bytes` 会 fail-closed。Artifact 超过配额会拒绝写入。
+检测到磁盘满错误时，SQLite/JSONL 返回可操作错误（释放空间后重试）。
+
+`just capacity-test` 覆盖这些有界失败和 4-Turn 负载。它**不是** 24h soak，也不能当作
+泄漏或发布门禁；其中 disk-full 覆盖仅验证合成错误到操作提示的映射，并未执行真实 OS
+磁盘耗尽或证明零 Event 丢失。
+
 ## 发布候选 dry-run
 
 `just release-dry-run` 构建 release 二进制和 Web 资源，并写出校验和与 CycloneDX SBOM。
