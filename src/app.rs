@@ -48,6 +48,23 @@ pub async fn build_runtime(config: &Config, fake_model: bool) -> Result<Arc<Agen
         default_tools = tools.clone();
     }
 
+    let mut kube = HashMap::new();
+    for workspace in catalog.iter() {
+        if let Some(scope) = &workspace.kubernetes
+            && let Ok(kube_client) = KubernetesClient::from_scope(client.clone(), scope)
+        {
+            kube.insert(workspace.id.as_str().to_owned(), Arc::new(kube_client));
+        }
+    }
+    let remediation = crate::runtime::RemediationRuntime::new(
+        config.remediation.enabled,
+        config.remediation.kill_switch,
+        config.extensions.production_safe,
+        config.remediation.demo_fault_url.clone(),
+        client.clone(),
+        kube,
+        std::time::Duration::from_secs(config.remediation.approval_ttl_seconds),
+    );
     let model: Arc<dyn ModelProvider> = if fake_model || config.model.provider == "fake" {
         Arc::new(DemoModelProvider)
     } else if config.model.provider == "openai" {
@@ -82,7 +99,8 @@ pub async fn build_runtime(config: &Config, fake_model: bool) -> Result<Arc<Agen
     .with_artifacts(artifacts)
     .with_workspaces(catalog, workspace_tools)
     .with_extensions(extensions)
-    .with_skills(workspace_skills, config.extensions.max_skill_context_bytes);
+    .with_skills(workspace_skills, config.extensions.max_skill_context_bytes)
+    .with_remediation(remediation);
     runtime.recover().await?;
     Ok(Arc::new(runtime))
 }
@@ -147,7 +165,7 @@ fn build_workspace_tools(
     tools.register(Arc::new(RunbookSearchTool::new(runbooks.clone())))?;
     tools.register(Arc::new(RunbookReadTool::new(runbooks)))?;
     tools.register(Arc::new(TopologyQueryTool))?;
-    if config.tools.exec {
+    if config.tools.exec && !config.extensions.production_safe {
         tools.register(Arc::new(
             ExecTool::new().with_max_output_bytes(config.runtime.max_output_bytes),
         ))?;

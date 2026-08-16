@@ -29,6 +29,7 @@ const EVENT_TYPES: RuntimeEventType[] = [
   "turn_failed",
   "turn_cancelled",
   "context_compacted",
+  "action_updated",
 ];
 
 const EVENT_TYPE_SET = new Set<string>(EVENT_TYPES);
@@ -64,6 +65,16 @@ export interface OpsApiClient {
   getRecovery(turnId: string): Promise<{ status: string; userAction: string; risk: string; resumePolicy: string; skippedTools: string[] }>;
   forkThread(threadId: string, atSeq: number, title?: string): Promise<{ id: string; parentThreadId: string; forkedAtSeq: number }>;
   resolveApproval(approvalId: string, approved: boolean): Promise<void>;
+  proposeActionPlan(
+    threadId: string,
+    kind: string,
+    parameters: Record<string, unknown>,
+    claimIds?: string[],
+  ): Promise<Record<string, unknown>>;
+  listActionPlans(threadId: string): Promise<Record<string, unknown>[]>;
+  approveAction(actionId: string, requestHash: string, approved: boolean): Promise<Record<string, unknown>>;
+  executeAction(actionId: string): Promise<Record<string, unknown>>;
+  setKillSwitch(enabled: boolean): Promise<{ enabled: boolean; killSwitch: boolean; mutations: number }>;
   subscribe(
     threadId: string,
     after: number,
@@ -425,6 +436,57 @@ export function createApiClient(
         method: "POST",
         body: JSON.stringify({ approved }),
       });
+    },
+
+    async proposeActionPlan(threadId, kind, parameters, claimIds) {
+      return asRecord(
+        await request<unknown>(apiUrl(`/api/v1/threads/${encodeURIComponent(threadId)}/action-plans`), {
+          method: "POST",
+          body: JSON.stringify({
+            kind,
+            parameters,
+            claim_ids: claimIds ?? [],
+          }),
+        }),
+      );
+    },
+
+    async listActionPlans(threadId) {
+      const body = asRecord(
+        await request<unknown>(apiUrl(`/api/v1/threads/${encodeURIComponent(threadId)}/action-plans`)),
+      );
+      return Array.isArray(body.actions) ? body.actions.map((item) => asRecord(item)) : [];
+    },
+
+    async approveAction(actionId, requestHash, approved) {
+      return asRecord(
+        await request<unknown>(apiUrl(`/api/v1/actions/${encodeURIComponent(actionId)}/approve`), {
+          method: "POST",
+          body: JSON.stringify({ request_hash: requestHash, approved }),
+        }),
+      );
+    },
+
+    async executeAction(actionId) {
+      return asRecord(
+        await request<unknown>(apiUrl(`/api/v1/actions/${encodeURIComponent(actionId)}/execute`), {
+          method: "POST",
+        }),
+      );
+    },
+
+    async setKillSwitch(enabled) {
+      const body = asRecord(
+        await request<unknown>(apiUrl("/api/v1/remediation/kill-switch"), {
+          method: "POST",
+          body: JSON.stringify({ enabled }),
+        }),
+      );
+      return {
+        enabled: body.enabled === true,
+        killSwitch: body.kill_switch === true,
+        mutations: typeof body.mutations === "number" ? body.mutations : 0,
+      };
     },
 
     subscribe(threadId, after, callbacks) {

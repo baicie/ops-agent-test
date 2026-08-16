@@ -27,6 +27,9 @@ demo-test:
 continuity-test:
     cargo test --locked --test continuity --test recovery_fault
 
+remediation-test:
+    cargo test --locked --test remediation
+
 acceptance-test:
     python3 -m unittest discover -s scripts/tests -v
 

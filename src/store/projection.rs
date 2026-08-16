@@ -146,6 +146,12 @@ pub fn status_after(status: ThreadStatus, event: &RuntimeEvent) -> ThreadStatus 
         RuntimeEvent::ApprovalResolved { .. } | RuntimeEvent::TurnStarted => ThreadStatus::Running,
         RuntimeEvent::TurnCompleted | RuntimeEvent::TurnCancelled => ThreadStatus::Idle,
         RuntimeEvent::TurnFailed { .. } => ThreadStatus::Failed,
+        RuntimeEvent::ActionUpdated { status, .. } if status == "needs_reconciliation" => {
+            ThreadStatus::NeedsReconciliation
+        }
+        RuntimeEvent::ActionUpdated { status, .. } if status == "awaiting_approval" => {
+            ThreadStatus::WaitingApproval
+        }
         _ => status,
     }
 }
@@ -225,5 +231,36 @@ fn apply_event(items: &mut Vec<Item>, status: &mut ThreadStatus, envelope: &Even
             summary: summary.clone(),
             source_evidence_ids: source_evidence_ids.clone(),
         }),
+        RuntimeEvent::ActionUpdated {
+            action_id,
+            status,
+            tool,
+            request_hash,
+            review,
+            ..
+        } => {
+            if let Some(Item::Action {
+                status: current,
+                request_hash: hash,
+                review: current_review,
+                ..
+            }) = items
+                .iter_mut()
+                .rev()
+                .find(|item| matches!(item, Item::Action { action_id: id, .. } if id == action_id))
+            {
+                *current = status.clone();
+                *hash = request_hash.clone();
+                *current_review = review.clone();
+            } else {
+                items.push(Item::Action {
+                    action_id: action_id.clone(),
+                    status: status.clone(),
+                    tool: tool.clone(),
+                    request_hash: request_hash.clone(),
+                    review: review.clone(),
+                });
+            }
+        }
     }
 }

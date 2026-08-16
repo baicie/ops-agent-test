@@ -156,6 +156,19 @@ describe("OpsCodex API client", () => {
     );
   });
 
+  it("posts action approval with the displayed request hash", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ status: "authorized" }));
+    const api = createApiClient("");
+    await api.approveAction("action-1", "hash-xyz", true);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/actions/action-1/approve",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ request_hash: "hash-xyz", approved: true }),
+      }),
+    );
+  });
+
   it("normalizes approval resolution replay events", () => {
     const event = normalizeEventEnvelope({
       seq: 9,

@@ -19,6 +19,9 @@ All notable changes to OpsCodex are documented in this file. The format follows
 - SQLite WAL default store, JSONL migrate/export, durable checkpoints/approvals/leases,
   recovery classification, context compaction, thread fork, and a simulated
   crash-after-checkpoint recovery suite.
+- Structured Safe Remediation: ActionPlan state machine, parameter-bound approvals,
+  isolated demo fault reset and Kubernetes scale runners, kill switch, and
+  hash-chained Security Audit. Default configuration still performs zero mutations.
 
 ### Documentation
 

@@ -11,11 +11,12 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     OpsCodexError, Result,
+    action::{ActionPlan, ActionRecord, AuditRecord, audit_record_hash},
     evidence::EvidenceMeta,
     model::ModelItem,
     runtime::{
-        ApprovalId, ContextBudget, EventEnvelope, EvidenceId, RuntimeEvent, StreamKind, Thread,
-        ThreadId, ThreadStatus, TurnId, TurnStatus, WorkspaceId,
+        ActionId, ApprovalId, ContextBudget, EventEnvelope, EvidenceId, RuntimeEvent, StreamKind,
+        Thread, ThreadId, ThreadStatus, TurnId, TurnStatus, WorkspaceId,
     },
     store::{
         AppendEvent, ApprovalStatus, CheckpointPhase, CheckpointRecord, DurableApproval,
@@ -120,6 +121,39 @@ CREATE TABLE IF NOT EXISTS leases (
 CREATE TABLE IF NOT EXISTS resume_ops (
     idempotency_key TEXT PRIMARY KEY,
     turn_id TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+"#;
+
+pub const SCHEMA_V2_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS action_plans (
+    plan_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS actions (
+    action_id TEXT PRIMARY KEY,
+    plan_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    operation_id TEXT NOT NULL UNIQUE,
+    consumed_approval INTEGER NOT NULL DEFAULT 0,
+    payload TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_actions_thread ON actions(thread_id);
+CREATE TABLE IF NOT EXISTS audit_log (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_hash TEXT NOT NULL,
+    previous_hash TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    workspace_id TEXT,
+    operation TEXT NOT NULL,
     payload TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
@@ -294,36 +328,68 @@ fn try_exclusive_lock(file: &File) -> Result<()> {
 }
 
 fn apply_schema(conn: &Connection) -> Result<()> {
-    let checksum = schema_checksum();
     conn.execute_batch(SCHEMA_SQL)
         .map_err(|error| sqlite_error("schema", error))?;
-    let applied: Option<String> = conn
-        .query_row(
-            "SELECT checksum FROM schema_migrations WHERE version = ?1",
-            params![SCHEMA_VERSION],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|error| sqlite_error("schema_migrations", error))?;
-    match applied {
+    record_or_verify_migration(conn, SCHEMA_VERSION, SCHEMA_SQL)?;
+    apply_if_missing(conn, 2, SCHEMA_V2_SQL)?;
+    Ok(())
+}
+
+fn migration_checksum(sql: &str) -> String {
+    Sha256::digest(sql.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn record_or_verify_migration(conn: &Connection, version: i64, sql: &str) -> Result<()> {
+    let checksum = migration_checksum(sql);
+    match migration_checksum_applied(conn, version)? {
+        Some(existing) if existing == checksum => Ok(()),
+        Some(_) => Err(OpsCodexError::Storage(
+            "sqlite schema checksum mismatch; refusing to start".into(),
+        )),
+        None => insert_migration(conn, version, &checksum),
+    }
+}
+
+fn apply_if_missing(conn: &Connection, version: i64, sql: &str) -> Result<()> {
+    let checksum = migration_checksum(sql);
+    match migration_checksum_applied(conn, version)? {
         Some(existing) if existing == checksum => Ok(()),
         Some(_) => Err(OpsCodexError::Storage(
             "sqlite schema checksum mismatch; refusing to start".into(),
         )),
         None => {
-            conn.execute(
-                "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?1, ?2, ?3)",
-                params![SCHEMA_VERSION, checksum, Utc::now().to_rfc3339()],
-            )
-            .map_err(|error| sqlite_error("schema_migrations insert", error))?;
-            Ok(())
+            conn.execute_batch(sql)
+                .map_err(|error| sqlite_error("schema", error))?;
+            insert_migration(conn, version, &checksum)
         }
     }
 }
 
+fn migration_checksum_applied(conn: &Connection, version: i64) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT checksum FROM schema_migrations WHERE version = ?1",
+        params![version],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|error| sqlite_error("schema_migrations", error))
+}
+
+fn insert_migration(conn: &Connection, version: i64, checksum: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?1, ?2, ?3)",
+        params![version, checksum, Utc::now().to_rfc3339()],
+    )
+    .map_err(|error| sqlite_error("schema_migrations insert", error))?;
+    Ok(())
+}
+
+#[allow(dead_code)]
 pub fn schema_checksum() -> String {
-    let digest = Sha256::digest(SCHEMA_SQL.as_bytes());
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    migration_checksum(SCHEMA_SQL)
 }
 
 fn append_event(conn: &mut Connection, command: AppendEvent) -> Result<EventEnvelope> {
@@ -1243,6 +1309,196 @@ fn remember_resume(
     Ok(None)
 }
 
+fn put_action_plan(conn: &Connection, plan: ActionPlan) -> Result<()> {
+    let payload = serde_json::to_string(&plan).map_err(|error| {
+        OpsCodexError::Storage(format!("failed to encode action plan: {error}"))
+    })?;
+    conn.execute(
+        "INSERT INTO action_plans(plan_id, workspace_id, thread_id, payload, created_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(plan_id) DO UPDATE SET
+            payload = excluded.payload,
+            expires_at = excluded.expires_at",
+        params![
+            plan.plan_id.to_string(),
+            plan.workspace_id.as_str(),
+            plan.thread_id.to_string(),
+            payload,
+            plan.created_at.to_rfc3339(),
+            plan.expires_at.to_rfc3339()
+        ],
+    )
+    .map_err(|error| sqlite_error("put action plan", error))?;
+    Ok(())
+}
+
+fn put_action(conn: &Connection, action: ActionRecord) -> Result<()> {
+    let payload = serde_json::to_string(&action)
+        .map_err(|error| OpsCodexError::Storage(format!("failed to encode action: {error}")))?;
+    conn.execute(
+        "INSERT INTO actions(action_id, plan_id, thread_id, status, request_hash, operation_id, consumed_approval, payload, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(action_id) DO UPDATE SET
+            status = excluded.status,
+            request_hash = excluded.request_hash,
+            consumed_approval = excluded.consumed_approval,
+            payload = excluded.payload,
+            updated_at = excluded.updated_at",
+        params![
+            action.action_id.to_string(),
+            action.plan_id.to_string(),
+            action.thread_id.to_string(),
+            action.status.as_str(),
+            action.request_hash,
+            action.operation_id,
+            i64::from(action.consumed_approval),
+            payload,
+            action.updated_at.to_rfc3339()
+        ],
+    )
+    .map_err(|error| sqlite_error("put action", error))?;
+    Ok(())
+}
+
+fn decode_action(payload: String) -> Result<ActionRecord> {
+    serde_json::from_str(&payload)
+        .map_err(|error| OpsCodexError::Storage(format!("invalid action payload: {error}")))
+}
+
+fn get_action(conn: &Connection, action_id: &ActionId) -> Result<Option<ActionRecord>> {
+    conn.query_row(
+        "SELECT payload FROM actions WHERE action_id = ?1",
+        params![action_id.to_string()],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(|error| sqlite_error("get action", error))?
+    .map(decode_action)
+    .transpose()
+}
+
+fn list_actions_for_thread(conn: &Connection, thread_id: &ThreadId) -> Result<Vec<ActionRecord>> {
+    let mut statement = conn
+        .prepare("SELECT payload FROM actions WHERE thread_id = ?1 ORDER BY updated_at ASC")
+        .map_err(|error| sqlite_error("list actions", error))?;
+    let rows = statement
+        .query_map(params![thread_id.to_string()], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|error| sqlite_error("list actions query", error))?;
+    let mut actions = Vec::new();
+    for row in rows {
+        actions.push(decode_action(
+            row.map_err(|error| sqlite_error("list actions row", error))?,
+        )?);
+    }
+    Ok(actions)
+}
+
+fn list_awaiting_approval_actions(conn: &Connection) -> Result<Vec<ActionRecord>> {
+    let mut statement = conn
+        .prepare("SELECT payload FROM actions WHERE status = 'awaiting_approval'")
+        .map_err(|error| sqlite_error("list awaiting actions", error))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| sqlite_error("list awaiting actions query", error))?;
+    let mut actions = Vec::new();
+    for row in rows {
+        actions.push(decode_action(row.map_err(|error| {
+            sqlite_error("list awaiting actions row", error)
+        })?)?);
+    }
+    Ok(actions)
+}
+
+fn append_audit(
+    conn: &Connection,
+    actor: &str,
+    workspace_id: Option<&str>,
+    operation: &str,
+    summary: serde_json::Value,
+) -> Result<()> {
+    let previous: String = conn
+        .query_row(
+            "SELECT record_hash FROM audit_log ORDER BY seq DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| sqlite_error("audit previous", error))?
+        .unwrap_or_else(|| "genesis".to_owned());
+    let created_at = Utc::now();
+    let record_hash = audit_record_hash(
+        &previous,
+        actor,
+        workspace_id,
+        operation,
+        &summary,
+        created_at,
+    );
+    let payload = serde_json::to_string(&summary)
+        .map_err(|error| OpsCodexError::Storage(format!("failed to encode audit: {error}")))?;
+    conn.execute(
+        "INSERT INTO audit_log(record_hash, previous_hash, actor, workspace_id, operation, payload, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            record_hash,
+            previous,
+            actor,
+            workspace_id,
+            operation,
+            payload,
+            created_at.to_rfc3339()
+        ],
+    )
+    .map_err(|error| sqlite_error("append audit", error))?;
+    Ok(())
+}
+
+fn list_audit(conn: &Connection) -> Result<Vec<AuditRecord>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT seq, record_hash, previous_hash, actor, workspace_id, operation, payload, created_at
+             FROM audit_log ORDER BY seq ASC",
+        )
+        .map_err(|error| sqlite_error("list audit", error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })
+        .map_err(|error| sqlite_error("list audit query", error))?;
+    let mut records = Vec::new();
+    for row in rows {
+        let (seq, record_hash, previous_hash, actor, workspace_id, operation, payload, created_at) =
+            row.map_err(|error| sqlite_error("list audit row", error))?;
+        let summary: serde_json::Value = serde_json::from_str(&payload)
+            .map_err(|error| OpsCodexError::Storage(format!("invalid audit payload: {error}")))?;
+        let created_at = DateTime::parse_from_rfc3339(&created_at)
+            .map_err(|error| OpsCodexError::Storage(format!("invalid audit timestamp: {error}")))?
+            .with_timezone(&Utc);
+        records.push(AuditRecord {
+            seq,
+            record_hash,
+            previous_hash,
+            actor,
+            workspace_id,
+            operation,
+            summary,
+            created_at,
+        });
+    }
+    Ok(records)
+}
+
 #[async_trait::async_trait]
 impl EventStore for SqliteStore {
     async fn create_thread(
@@ -1492,16 +1748,64 @@ impl EventStore for SqliteStore {
         })
         .await
     }
+
+    async fn put_action_plan(&self, plan: ActionPlan) -> Result<()> {
+        self.with_conn(move |conn| put_action_plan(conn, plan))
+            .await
+    }
+
+    async fn get_action(&self, action_id: &ActionId) -> Result<Option<ActionRecord>> {
+        let action_id = action_id.clone();
+        self.with_conn(move |conn| get_action(conn, &action_id))
+            .await
+    }
+
+    async fn put_action(&self, action: ActionRecord) -> Result<()> {
+        self.with_conn(move |conn| put_action(conn, action)).await
+    }
+
+    async fn list_actions_for_thread(&self, thread_id: &ThreadId) -> Result<Vec<ActionRecord>> {
+        let thread_id = thread_id.clone();
+        self.with_conn(move |conn| list_actions_for_thread(conn, &thread_id))
+            .await
+    }
+
+    async fn list_awaiting_approval_actions(&self) -> Result<Vec<ActionRecord>> {
+        self.with_conn(|conn| list_awaiting_approval_actions(conn))
+            .await
+    }
+
+    async fn append_audit(
+        &self,
+        actor: &str,
+        workspace_id: Option<&str>,
+        operation: &str,
+        summary: serde_json::Value,
+    ) -> Result<()> {
+        let actor = actor.to_owned();
+        let workspace_id = workspace_id.map(ToOwned::to_owned);
+        let operation = operation.to_owned();
+        self.with_conn(move |conn| {
+            append_audit(conn, &actor, workspace_id.as_deref(), &operation, summary)
+        })
+        .await
+    }
+
+    async fn list_audit(&self) -> Result<Vec<AuditRecord>> {
+        self.with_conn(|conn| list_audit(conn)).await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::time::Duration;
     use tempfile::tempdir;
 
     #[tokio::test]
     async fn schema_checksum_mismatch_refuses_start() {
+        assert_eq!(schema_checksum().len(), 64);
         let directory = tempdir().unwrap();
         let path = directory.path().join("state.sqlite3");
         let store = SqliteStore::open(&path).await.unwrap();
@@ -1565,5 +1869,34 @@ mod tests {
             )
             .await
             .unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn audit_hash_chain_detects_payload_tamper() {
+        let directory = tempdir().unwrap();
+        let store = SqliteStore::open(directory.path().join("state.sqlite3"))
+            .await
+            .unwrap();
+        store
+            .append_audit(
+                "operator",
+                Some("local-demo"),
+                "action.authorized",
+                json!({"ok": true}),
+            )
+            .await
+            .unwrap();
+        crate::action::verify_audit_chain(&store.list_audit().await.unwrap()).unwrap();
+        drop(store);
+        let conn = Connection::open(directory.path().join("state.sqlite3")).unwrap();
+        conn.execute("UPDATE audit_log SET payload = '{\"ok\":false}'", [])
+            .unwrap();
+        drop(conn);
+        let store = SqliteStore::open(directory.path().join("state.sqlite3"))
+            .await
+            .unwrap();
+        let error =
+            crate::action::verify_audit_chain(&store.list_audit().await.unwrap()).unwrap_err();
+        assert!(error.to_string().contains("hash"));
     }
 }

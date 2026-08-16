@@ -32,7 +32,8 @@ phase's acceptance gate, and update an ADR before changing a recorded decision.
 - One active Turn per Thread and four concurrent Turns globally by default
 - Append-only JSONL persistence with monotonic sequence numbers and reconnect replay
 - Axum REST API and SSE event stream
-- React/Vite UI for workspace selection, threads, Alert Context, streaming chat, tools, Topology, Evidence-linked Diagnosis, approvals and Stop
+- React/Vite UI for workspace selection, threads, Alert Context, streaming chat, tools, Topology, Evidence-linked Diagnosis, approvals, structured Action review and Stop
+- Structured Safe Remediation (off by default): ActionPlan, request-hash approval, demo fault reset, Kubernetes scale, kill switch, and hash-chained audit
 - Deterministic order-service incident with Prometheus metrics and Docker logs
 
 ## Architecture
@@ -44,11 +45,13 @@ React or CLI
      |
 Axum App Server
      |
-Agent Runtime ---- JSONL Thread Store
+Agent Runtime ---- SQLite Event Store (JSONL import/export)
      |
      +---- ModelProvider ---- OpenAI-compatible Responses API
      |
      +---- Tool Registry ---- Prometheus / Loki / Tempo / Kubernetes / Docker / HTTP / Runbooks / MCP / Custom / approved Exec
+     |
+     +---- Remediation runner ---- demo fault reset / Kubernetes scale (approval-bound)
      |
      +---- Skill Catalog ---- local SKILL.md context only
 ```
@@ -237,6 +240,12 @@ change or side-effecting tools whose result is unknown enter `needs_reconciliati
 and are never retried automatically. Recovery classification is covered by
 `just continuity-test`; that suite simulates a kill after each durable checkpoint
 commit. It does not replace a live Provider gate.
+
+Structured remediation is disabled by default (`[remediation] enabled = false`).
+When enabled per Workspace, the model can only propose an ActionPlan. Execution
+requires an exact request-hash approval, a separate runner, and a process kill
+switch that blocks new change operations. `exec`, MCP, and custom tools cannot
+be used as remediation. Verify with `just remediation-test`.
 
 ## Development
 

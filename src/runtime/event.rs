@@ -5,7 +5,9 @@ use uuid::Uuid;
 
 use crate::evidence::{Diagnosis, EvidenceMeta};
 
-use super::{ApprovalId, EventId, IncidentContext, ItemId, ThreadId, TurnId, WorkspaceId};
+use super::{
+    ActionId, ApprovalId, EventId, IncidentContext, ItemId, PlanId, ThreadId, TurnId, WorkspaceId,
+};
 
 pub const EVENT_SCHEMA_VERSION: u32 = 2;
 const V1_EVENT_NAMESPACE: Uuid = uuid::uuid!("7c3d2e91-5a4b-4f6c-8d1e-0a9b8c7d6e5f");
@@ -105,6 +107,14 @@ pub enum RuntimeEvent {
         prompt_version: Option<String>,
         summary: String,
     },
+    ActionUpdated {
+        action_id: ActionId,
+        plan_id: PlanId,
+        status: String,
+        tool: String,
+        request_hash: String,
+        review: Value,
+    },
 }
 
 impl RuntimeEvent {
@@ -140,6 +150,7 @@ impl RuntimeEvent {
             Self::TurnFailed { .. } => "turn_failed",
             Self::TurnCancelled => "turn_cancelled",
             Self::ContextCompacted { .. } => "context_compacted",
+            Self::ActionUpdated { .. } => "action_updated",
         }
     }
 

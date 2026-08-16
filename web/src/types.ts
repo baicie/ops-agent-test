@@ -90,6 +90,7 @@ export type RuntimeEventType =
   | "turn_failed"
   | "turn_cancelled"
   | "context_compacted"
+  | "action_updated"
   | "unknown";
 
 export interface NormalizedEvent {
@@ -175,7 +176,17 @@ export interface ApprovalItem extends TimelineBase {
   status: "pending" | "approved" | "rejected";
 }
 
-export type TimelineItem = MessageItem | ToolItem | ApprovalItem;
+export interface ActionItem extends TimelineBase {
+  kind: "action";
+  actionId: string;
+  planId: string;
+  tool: string;
+  status: string;
+  requestHash: string;
+  review: Record<string, unknown>;
+}
+
+export type TimelineItem = MessageItem | ToolItem | ApprovalItem | ActionItem;
 
 export type LoadStatus = "idle" | "loading" | "ready" | "error";
 export type ConnectionStatus = "idle" | "connecting" | "connected" | "reconnecting";

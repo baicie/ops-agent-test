@@ -42,6 +42,7 @@ pub struct Workspace {
     pub runbook_dir: Option<PathBuf>,
     pub max_concurrent_turns: usize,
     pub max_effect: Option<crate::extensions::CapabilityEffect>,
+    pub allow_remediation: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -214,6 +215,7 @@ fn workspace_from_entry(config: &Config, entry: &WorkspaceConfigEntry) -> Result
             .as_deref()
             .map(crate::extensions::CapabilityEffect::parse)
             .transpose()?,
+        allow_remediation: entry.allow_remediation,
     })
 }
 

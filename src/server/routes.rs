@@ -14,8 +14,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     OpsCodexError,
     runtime::{
-        ApprovalId, EventEnvelope, EvidenceId, IncidentContext, Item, StreamKind, Thread, ThreadId,
-        TurnId, TurnInput, WorkspaceId,
+        ActionId, ApprovalId, ClaimId, EventEnvelope, EvidenceId, IncidentContext, Item,
+        StreamKind, Thread, ThreadId, TurnId, TurnInput, WorkspaceId,
     },
     topology::{TopologyQuery, project_topology, query_topology},
 };
@@ -39,6 +39,15 @@ pub(crate) fn api_router(state: ServerState) -> Router {
         )
         .route("/artifacts/{sha256}", get(get_artifact))
         .route("/approvals/{approval_id}", post(resolve_approval))
+        .route(
+            "/threads/{thread_id}/action-plans",
+            get(list_action_plans).post(propose_action_plan),
+        )
+        .route("/actions/{action_id}/approve", post(approve_action))
+        .route("/actions/{action_id}/execute", post(execute_action))
+        .route("/remediation", get(get_remediation))
+        .route("/remediation/kill-switch", post(set_kill_switch))
+        .route("/audit", get(list_audit))
         .route("/turns/{turn_id}/interrupt", post(interrupt_turn))
         .route("/turns/{turn_id}/resume", post(resume_turn))
         .route("/turns/{turn_id}/recovery", get(get_recovery))
@@ -61,6 +70,9 @@ async fn health(State(state): State<ServerState>) -> Json<serde_json::Value> {
         "store": "ok",
         "provider": "configured",
         "turns_started": state.runtime.metrics().turns_started.load(std::sync::atomic::Ordering::Relaxed),
+        "remediation_enabled": state.runtime.remediation.enabled,
+        "kill_switch": state.runtime.kill_switch(),
+        "mutations": state.runtime.mutation_count(),
     }))
 }
 
@@ -440,6 +452,167 @@ async fn get_recovery(
 ) -> ApiResult<impl IntoResponse> {
     let turn_id = parse_id::<TurnId>("turn", &turn_id)?;
     Ok(Json(state.runtime.recovery_report(&turn_id).await?))
+}
+
+#[derive(Deserialize)]
+struct ProposeActionRequest {
+    kind: String,
+    #[serde(default)]
+    parameters: serde_json::Value,
+    #[serde(default)]
+    claim_ids: Vec<String>,
+}
+
+async fn list_action_plans(
+    State(state): State<ServerState>,
+    Path(thread_id): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    let thread_id = parse_id::<ThreadId>("thread", &thread_id)?;
+    state.runtime.store().get_thread(&thread_id).await?;
+    Ok(Json(json!({
+        "actions": state.runtime.list_thread_actions(&thread_id).await?
+    })))
+}
+
+async fn propose_action_plan(
+    State(state): State<ServerState>,
+    Path(thread_id): Path<String>,
+    Json(request): Json<ProposeActionRequest>,
+) -> ApiResult<impl IntoResponse> {
+    let thread_id = parse_id::<ThreadId>("thread", &thread_id)?;
+    if request.kind.trim().is_empty() {
+        return Err(ApiError::bad_request("kind must not be empty"));
+    }
+    let mut claim_ids = Vec::new();
+    for claim_id in request.claim_ids {
+        claim_ids.push(parse_id::<ClaimId>("claim", &claim_id)?);
+    }
+    let after = state
+        .runtime
+        .store()
+        .last_seq(&thread_id)
+        .await
+        .unwrap_or(0);
+    let action = state
+        .runtime
+        .propose_action_plan(
+            &thread_id,
+            &request.kind,
+            request.parameters,
+            claim_ids,
+            CancellationToken::new(),
+        )
+        .await?;
+    publish_new_events(&state, &thread_id, after).await?;
+    Ok((StatusCode::CREATED, Json(action)))
+}
+
+#[derive(Deserialize)]
+struct ApproveActionRequest {
+    #[serde(default)]
+    request_hash: String,
+    approved: bool,
+}
+
+async fn approve_action(
+    State(state): State<ServerState>,
+    Path(action_id): Path<String>,
+    Json(request): Json<ApproveActionRequest>,
+) -> ApiResult<impl IntoResponse> {
+    if request.request_hash.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "request_hash is required to bind an approval",
+        ));
+    }
+    let action_id = parse_id::<ActionId>("action", &action_id)?;
+    let existing = state
+        .runtime
+        .store()
+        .get_action(&action_id)
+        .await?
+        .ok_or_else(|| OpsCodexError::NotFound(format!("action {action_id}")))?;
+    let after = state
+        .runtime
+        .store()
+        .last_seq(&existing.thread_id)
+        .await
+        .unwrap_or(0);
+    let action = state
+        .runtime
+        .approve_action(&action_id, &request.request_hash, request.approved)
+        .await?;
+    publish_new_events(&state, &action.thread_id, after).await?;
+    Ok(Json(action))
+}
+
+async fn execute_action(
+    State(state): State<ServerState>,
+    Path(action_id): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    let action_id = parse_id::<ActionId>("action", &action_id)?;
+    let existing = state
+        .runtime
+        .store()
+        .get_action(&action_id)
+        .await?
+        .ok_or_else(|| OpsCodexError::NotFound(format!("action {action_id}")))?;
+    let after = state
+        .runtime
+        .store()
+        .last_seq(&existing.thread_id)
+        .await
+        .unwrap_or(0);
+    let action = state
+        .runtime
+        .execute_action(&action_id, CancellationToken::new())
+        .await?;
+    publish_new_events(&state, &action.thread_id, after).await?;
+    Ok(Json(action))
+}
+
+#[derive(Deserialize)]
+struct KillSwitchRequest {
+    enabled: bool,
+}
+
+async fn get_remediation(State(state): State<ServerState>) -> Json<serde_json::Value> {
+    Json(json!({
+        "enabled": state.runtime.remediation.enabled,
+        "kill_switch": state.runtime.kill_switch(),
+        "mutations": state.runtime.mutation_count(),
+    }))
+}
+
+async fn set_kill_switch(
+    State(state): State<ServerState>,
+    Json(request): Json<KillSwitchRequest>,
+) -> Json<serde_json::Value> {
+    state.runtime.set_kill_switch(request.enabled);
+    Json(json!({
+        "enabled": state.runtime.remediation.enabled,
+        "kill_switch": state.runtime.kill_switch(),
+        "mutations": state.runtime.mutation_count(),
+    }))
+}
+
+async fn list_audit(State(state): State<ServerState>) -> ApiResult<impl IntoResponse> {
+    state.runtime.verify_audit_log().await?;
+    Ok(Json(json!({
+        "records": state.runtime.store().list_audit().await?
+    })))
+}
+
+async fn publish_new_events(
+    state: &ServerState,
+    thread_id: &ThreadId,
+    after: u64,
+) -> ApiResult<()> {
+    let events = state.runtime.store().events_after(thread_id, after).await?;
+    let sender = state.event_hub.sender(thread_id);
+    for envelope in events {
+        let _ = sender.send(envelope);
+    }
+    Ok(())
 }
 
 async fn get_topology(

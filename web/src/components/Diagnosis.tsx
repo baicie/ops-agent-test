@@ -1,15 +1,24 @@
 import type { Diagnosis } from "../types";
 import { Badge } from "./ui/badge";
+import { Button } from "./ui/button";
 
 export function DiagnosisView({
   diagnosis,
   selectedEvidenceId,
   onSelectEvidence,
+  onProposeRemediation,
+  proposing,
 }: {
   diagnosis: Diagnosis;
   selectedEvidenceId?: string | null;
   onSelectEvidence?: (evidenceId: string) => void;
+  onProposeRemediation?: (claimIds: string[]) => void;
+  proposing?: boolean;
 }) {
+  const claimIds = diagnosis.claims
+    .map((claim) => claim.claim_id)
+    .filter((id): id is string => typeof id === "string" && id.length > 0);
+
   return (
     <section className="mt-3 space-y-3 rounded-md border border-zinc-200 bg-white p-4 shadow-sm">
       <div>
@@ -68,6 +77,18 @@ export function DiagnosisView({
               <li key={item}>{item}</li>
             ))}
           </ul>
+        </div>
+      )}
+      {onProposeRemediation && (
+        <div className="flex justify-end border-t border-zinc-100 pt-3">
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={proposing}
+            onClick={() => onProposeRemediation(claimIds)}
+          >
+            Propose remediation
+          </Button>
         </div>
       )}
     </section>

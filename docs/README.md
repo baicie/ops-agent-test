@@ -30,7 +30,7 @@ Issue、聊天记录或代码注释中。
 | `v0.3` Runtime Workspace | 实现中 | [v0.3](phases/v0.3-runtime-workspace.md) |
 | `v0.4` Extensibility | 实现中 | [v0.4](phases/v0.4-extensibility.md) |
 | `v0.5` Continuity | 实现中 | [v0.5](phases/v0.5-continuity.md) |
-| `v0.6` Safe Remediation | 计划中 | [v0.6](phases/v0.6-safe-remediation.md) |
+| `v0.6` Safe Remediation | 实现中 | [v0.6](phases/v0.6-safe-remediation.md) |
 | `v1.0` Production Ready | 计划中 | [v1.0](phases/v1.0-production-readiness.md) |
 
 ## 状态定义
@@ -68,4 +68,6 @@ Provider gate 尚未跑过，因此该阶段不能标为已发布。`v0.5` Conti
 默认存储、JSONL 迁移/导出、checkpoint/lease/durable approval、recovery、compaction 和
 Thread Fork 已经落地。崩溃分类由 `just continuity-test` 在 durable checkpoint 提交后模拟
 进程退出；真实 OS kill-process suite 与 Provider gate 尚未作为发布门禁跑过，因此该阶段不能标为
-已发布。
+已发布。`v0.6` Safe Remediation 正在实现中：结构化 ActionPlan、参数绑定批准、Demo fault reset、
+Kubernetes scale、kill switch 和 hash-chained Audit 已经落地。默认配置 mutation count 仍为 0；
+真实环境 gate 与受保护 cluster smoke 尚未作为发布门禁跑过，因此该阶段不能标为已发布。

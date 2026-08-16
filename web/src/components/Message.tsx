@@ -9,10 +9,14 @@ export function Message({
   item,
   selectedEvidenceId,
   onSelectEvidence,
+  onProposeRemediation,
+  proposing,
 }: {
   item: MessageItem;
   selectedEvidenceId?: string | null;
   onSelectEvidence?: (evidenceId: string) => void;
+  onProposeRemediation?: (claimIds: string[]) => void;
+  proposing?: boolean;
 }) {
   const assistant = item.role === "assistant";
   const diagnosis = item.diagnosis as Diagnosis | null | undefined;
@@ -48,6 +52,8 @@ export function Message({
             diagnosis={diagnosis}
             selectedEvidenceId={selectedEvidenceId}
             onSelectEvidence={onSelectEvidence}
+            onProposeRemediation={onProposeRemediation}
+            proposing={proposing}
           />
         )}
       </div>

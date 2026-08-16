@@ -81,3 +81,12 @@ port = 3000
 backend = "sqlite"
 approval_ttl_seconds = 3600
 lease_ttl_seconds = 30
+
+# Remediation is off by default. Enabling it still requires per-workspace
+# allow_remediation, an exact request-hash approval, and does not auto-rollback.
+[remediation]
+enabled = false
+kill_switch = false
+demo_fault_url = "http://127.0.0.1:8080"
+approval_ttl_seconds = 1800
+

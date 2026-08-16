@@ -49,6 +49,7 @@ Rules:
 7. Incident context is unverified. Confirm every statement with tools.
 8. Keep investigating until you can provide a useful diagnosis or a clear abstain.
 9. Stay inside the current Workspace. Kubernetes, topology and runbook tools are read-only references.
+10. Do not change the environment. Structured ActionPlan remediation is proposed out of band; never treat exec, MCP, or custom tools as remediation.
 
 Successful tool results include an evidence_id. Final answers MUST be a JSON object:
 {
@@ -138,10 +139,10 @@ enum TurnStart {
 pub struct AgentRuntime {
     model: Arc<dyn ModelProvider>,
     tools: ToolRegistry,
-    workspaces: Arc<WorkspaceCatalog>,
+    pub(crate) workspaces: Arc<WorkspaceCatalog>,
     workspace_tools: Arc<HashMap<String, ToolRegistry>>,
-    policy: PolicyEngine,
-    store: Arc<dyn EventStore>,
+    pub(crate) policy: PolicyEngine,
+    pub(crate) store: Arc<dyn EventStore>,
     artifacts: Arc<ArtifactStore>,
     metrics: Arc<RuntimeMetrics>,
     config: RuntimeConfig,
@@ -151,6 +152,7 @@ pub struct AgentRuntime {
     workspace_skills: Arc<HashMap<String, SkillCatalog>>,
     skill_budget_bytes: usize,
     owner_id: String,
+    pub(crate) remediation: Arc<crate::runtime::remediation::RemediationRuntime>,
 }
 
 impl AgentRuntime {
@@ -177,6 +179,7 @@ impl AgentRuntime {
             workspace_skills: Arc::new(HashMap::new()),
             skill_budget_bytes: 4 * 1024,
             owner_id: uuid::Uuid::now_v7().to_string(),
+            remediation: Arc::new(crate::runtime::remediation::RemediationRuntime::disabled()),
         }
     }
 
@@ -212,6 +215,14 @@ impl AgentRuntime {
     ) -> Self {
         self.workspace_skills = Arc::new(skills);
         self.skill_budget_bytes = skill_budget_bytes.max(128);
+        self
+    }
+
+    pub fn with_remediation(
+        mut self,
+        remediation: crate::runtime::remediation::RemediationRuntime,
+    ) -> Self {
+        self.remediation = Arc::new(remediation);
         self
     }
 
@@ -273,6 +284,31 @@ impl AgentRuntime {
             if approval.expires_at.is_some_and(|expires| expires <= now) {
                 approval.status = ApprovalStatus::Expired;
                 self.store.put_approval(approval).await?;
+            }
+        }
+        for mut action in self.store.list_awaiting_approval_actions().await? {
+            if action.expires_at <= now {
+                action.status = crate::action::transition(
+                    crate::action::ActionStatus::AwaitingApproval,
+                    crate::action::ActionStatus::Expired,
+                )?;
+                action.updated_at = Utc::now();
+                self.store.put_action(action.clone()).await?;
+                let _ = self
+                    .store
+                    .append(
+                        &action.thread_id,
+                        None,
+                        RuntimeEvent::ActionUpdated {
+                            action_id: action.action_id.clone(),
+                            plan_id: action.plan_id.clone(),
+                            status: action.status.as_str().to_owned(),
+                            tool: action.tool_id.clone(),
+                            request_hash: action.request_hash.clone(),
+                            review: action.review_summary(),
+                        },
+                    )
+                    .await;
             }
         }
         let mut reports = Vec::new();

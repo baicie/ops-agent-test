@@ -53,6 +53,8 @@ identifier!(EventId);
 identifier!(ItemId);
 identifier!(EvidenceId);
 identifier!(ClaimId);
+identifier!(PlanId);
+identifier!(ActionId);
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(transparent)]
@@ -158,6 +160,13 @@ pub enum Item {
         covers_seq_end: u64,
         summary: String,
         source_evidence_ids: Vec<String>,
+    },
+    Action {
+        action_id: ActionId,
+        status: String,
+        tool: String,
+        request_hash: String,
+        review: Value,
     },
 }
 

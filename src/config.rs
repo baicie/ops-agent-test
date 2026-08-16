@@ -21,6 +21,7 @@ pub struct Config {
     pub extension: Vec<ExtensionConfigEntry>,
     pub skills: Vec<SkillConfigEntry>,
     pub store: StoreConfig,
+    pub remediation: RemediationConfig,
 }
 
 impl Config {
@@ -139,6 +140,19 @@ impl Config {
             return Err(OpsCodexError::Protocol(
                 "store.approval_ttl_seconds and store.lease_ttl_seconds must be greater than zero"
                     .into(),
+            ));
+        }
+        if self.remediation.approval_ttl_seconds == 0 {
+            return Err(OpsCodexError::Protocol(
+                "remediation.approval_ttl_seconds must be greater than zero".into(),
+            ));
+        }
+        let demo_url = url::Url::parse(&self.remediation.demo_fault_url).map_err(|error| {
+            OpsCodexError::Protocol(format!("invalid remediation.demo_fault_url: {error}"))
+        })?;
+        if !matches!(demo_url.host_str(), Some("127.0.0.1" | "localhost" | "::1")) {
+            return Err(OpsCodexError::Protocol(
+                "remediation.demo_fault_url must be a loopback host".into(),
             ));
         }
         if !matches!(self.store.backend.as_str(), "sqlite" | "jsonl") {
@@ -363,6 +377,7 @@ pub struct WorkspaceConfigEntry {
     pub runbook_dir: Option<String>,
     pub max_concurrent_turns: Option<usize>,
     pub max_effect: Option<String>,
+    pub allow_remediation: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -469,6 +484,26 @@ impl Default for StoreConfig {
             jsonl_dir: None,
             approval_ttl_seconds: 3600,
             lease_ttl_seconds: 30,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemediationConfig {
+    pub enabled: bool,
+    pub kill_switch: bool,
+    pub demo_fault_url: String,
+    pub approval_ttl_seconds: u64,
+}
+
+impl Default for RemediationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            kill_switch: false,
+            demo_fault_url: "http://127.0.0.1:8080".into(),
+            approval_ttl_seconds: 1800,
         }
     }
 }

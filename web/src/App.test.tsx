@@ -59,6 +59,38 @@ function createClient(detail?: ThreadDetail): OpsApiClient {
     }),
     forkThread: vi.fn().mockResolvedValue({ id: "thread-fork", parentThreadId: "thread-1", forkedAtSeq: 2 }),
     resolveApproval: vi.fn().mockResolvedValue(undefined),
+    proposeActionPlan: vi.fn().mockResolvedValue({
+      action_id: "action-1",
+      plan_id: "plan-1",
+      status: "awaiting_approval",
+      tool_id: "demo_fault_reset",
+      request_hash: "hash-xyz",
+      thread_id: "thread-1",
+      review: {
+        target: "demo:order-service",
+        effect: "change_reversible",
+        parameters: { service: "order-service", mode: "normal" },
+        preconditions: ["loopback-only"],
+        blast_radius: "single local demo container",
+        dry_run: "dry-run would POST /debug/fault/normal",
+        verification: "GET /health returns status=ok and mode=normal",
+      },
+    }),
+    listActionPlans: vi.fn().mockResolvedValue([]),
+    approveAction: vi.fn().mockResolvedValue({
+      action_id: "action-1",
+      status: "authorized",
+      request_hash: "hash-xyz",
+      tool_id: "demo_fault_reset",
+      review: { target: "demo:order-service", request_hash: "hash-xyz" },
+    }),
+    executeAction: vi.fn().mockResolvedValue({
+      action_id: "action-1",
+      status: "succeeded",
+      tool_id: "demo_fault_reset",
+      request_hash: "hash-xyz",
+    }),
+    setKillSwitch: vi.fn().mockResolvedValue({ enabled: false, killSwitch: true, mutations: 0 }),
     subscribe: vi.fn().mockReturnValue({ close: vi.fn() }),
   };
 }
@@ -144,6 +176,72 @@ describe("OpsCodex app", () => {
 
     await waitFor(() => expect(client.resolveApproval).toHaveBeenCalledWith("approval-1", true));
     expect(screen.getByText("Allowed")).toBeInTheDocument();
+  });
+
+  it("proposes remediation from a diagnosis and binds approval to the displayed hash", async () => {
+    const client = createClient({
+      id: "thread-1",
+      title: "Order service incident",
+      status: "completed",
+      workspaceId: "local-demo",
+      events: [
+        event(1, "assistant_completed", {
+          content: "The service is in a latency fault.",
+          diagnosis: {
+            summary: "order-service is in latency fault",
+            claims: [
+              {
+                claim_id: "11111111-1111-1111-1111-111111111111",
+                kind: "observed",
+                statement: "fault mode is latency",
+              },
+            ],
+          },
+        }),
+      ],
+    });
+
+    render(<App client={client} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Propose remediation" }));
+    await waitFor(() =>
+      expect(client.proposeActionPlan).toHaveBeenCalledWith(
+        "thread-1",
+        "demo_fault_reset",
+        { service: "order-service", mode: "normal" },
+        ["11111111-1111-1111-1111-111111111111"],
+      ),
+    );
+  });
+
+  it("approves a structured action using the displayed request hash", async () => {
+    const client = createClient({
+      id: "thread-1",
+      title: "Remediation review",
+      status: "waiting_approval",
+      workspaceId: "local-demo",
+      events: [
+        event(1, "action_updated", {
+          action_id: "action-1",
+          plan_id: "plan-1",
+          status: "awaiting_approval",
+          tool: "demo_fault_reset",
+          request_hash: "hash-xyz",
+          review: {
+            target: "demo:order-service",
+            effect: "change_reversible",
+            parameters: { service: "order-service", mode: "normal" },
+            preconditions: ["loopback-only"],
+            blast_radius: "single local demo container",
+            dry_run: "dry-run would POST /debug/fault/normal",
+            verification: "GET /health returns status=ok and mode=normal",
+          },
+        }),
+      ],
+    });
+
+    render(<App client={client} />);
+    await userEvent.click(await screen.findByRole("button", { name: "Approve this action" }));
+    await waitFor(() => expect(client.approveAction).toHaveBeenCalledWith("action-1", "hash-xyz", true));
   });
 
   it("shows alert context and locates evidence from a diagnosis claim", async () => {

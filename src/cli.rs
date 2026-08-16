@@ -28,6 +28,12 @@ pub struct Cli {
     #[arg(
         long,
         global = true,
+        help = "Block all change operations regardless of existing approvals"
+    )]
+    pub kill_switch: bool,
+    #[arg(
+        long,
+        global = true,
         help = "Use the deterministic local model provider"
     )]
     pub fake_model: bool,
@@ -86,6 +92,9 @@ pub async fn execute(cli: Cli) -> Result<()> {
     }
     if cli.enable_exec {
         config.tools.exec = true;
+    }
+    if cli.kill_switch {
+        config.remediation.kill_switch = true;
     }
     config.validate()?;
     let runtime = build_runtime(&config, cli.fake_model).await?;

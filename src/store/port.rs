@@ -6,11 +6,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     OpsCodexError, Result,
+    action::{ActionPlan, ActionRecord, AuditRecord},
     evidence::EvidenceMeta,
     model::ModelItem,
     runtime::{
-        ApprovalId, ContextBudget, EventEnvelope, EventId, EvidenceId, ItemId, RuntimeEvent,
-        StreamKind, Thread, ThreadId, ThreadStatus, TurnId, WorkspaceId,
+        ActionId, ApprovalId, ContextBudget, EventEnvelope, EventId, EvidenceId, ItemId,
+        RuntimeEvent, StreamKind, Thread, ThreadId, ThreadStatus, TurnId, WorkspaceId,
     },
 };
 
@@ -194,5 +195,43 @@ pub trait EventStore: Send + Sync {
 
     async fn force_release_turn_lease(&self, _turn_id: &TurnId) -> Result<()> {
         Ok(())
+    }
+
+    async fn put_action_plan(&self, _plan: ActionPlan) -> Result<()> {
+        Err(OpsCodexError::Protocol(
+            "action plans require the sqlite store".into(),
+        ))
+    }
+
+    async fn get_action(&self, _action_id: &ActionId) -> Result<Option<ActionRecord>> {
+        Ok(None)
+    }
+
+    async fn put_action(&self, _action: ActionRecord) -> Result<()> {
+        Err(OpsCodexError::Protocol(
+            "actions require the sqlite store".into(),
+        ))
+    }
+
+    async fn list_actions_for_thread(&self, _thread_id: &ThreadId) -> Result<Vec<ActionRecord>> {
+        Ok(Vec::new())
+    }
+
+    async fn list_awaiting_approval_actions(&self) -> Result<Vec<ActionRecord>> {
+        Ok(Vec::new())
+    }
+
+    async fn append_audit(
+        &self,
+        _actor: &str,
+        _workspace_id: Option<&str>,
+        _operation: &str,
+        _summary: serde_json::Value,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn list_audit(&self) -> Result<Vec<AuditRecord>> {
+        Ok(Vec::new())
     }
 }
