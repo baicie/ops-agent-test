@@ -21,6 +21,8 @@ interface ChatProps {
   onSend: (input: string, incidentContext?: IncidentContext) => void;
   onStop: () => void;
   onApproval: (approvalId: string, approved: boolean) => void;
+  onResume?: () => void;
+  onFork?: () => void;
   onDismissError: () => void;
   onSelectEvidence: (evidenceId: string | null) => void;
 }
@@ -42,6 +44,8 @@ export function Chat({
   onSend,
   onStop,
   onApproval,
+  onResume,
+  onFork,
   onDismissError,
   onSelectEvidence,
 }: ChatProps) {
@@ -77,6 +81,26 @@ export function Chat({
         <div role="status" className="flex shrink-0 items-center gap-2 border-b border-sky-200 bg-sky-50 px-4 py-2 text-xs text-sky-900">
           <Info aria-hidden="true" className="h-4 w-4 shrink-0" />
           <span className="min-w-0 flex-1 truncate">{state.clientUpgradeHint}</span>
+        </div>
+      )}
+      {(state.turnStatus === "interrupted" || state.turnStatus === "needs_reconciliation") && (
+        <div role="status" className="flex shrink-0 items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-950">
+          <Info aria-hidden="true" className="h-4 w-4 shrink-0" />
+          <span className="min-w-0 flex-1">
+            {state.turnStatus === "needs_reconciliation"
+              ? "A change operation finished in an unknown state. OpsCodex will not retry it automatically."
+              : "This turn was interrupted. Resume continues from the last checkpoint and will not repeat completed tools."}
+          </span>
+          {state.turnStatus === "interrupted" && onResume && (
+            <Button size="sm" variant="outline" className="h-7 px-2" onClick={onResume}>
+              Resume
+            </Button>
+          )}
+          {onFork && (
+            <Button size="sm" variant="outline" className="h-7 px-2" onClick={onFork}>
+              Fork
+            </Button>
+          )}
         </div>
       )}
       {state.selectedEvidenceId && !evidencePresent && (
@@ -175,6 +199,15 @@ export function Chat({
           </div>
         )}
       </ScrollArea>
+      {hasThread && (
+        <div className="flex items-center justify-end gap-2 border-t border-zinc-200 bg-white px-4 py-1.5">
+          {onFork && state.turnStatus !== "running" && (
+            <Button size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={onFork}>
+              Fork at seq {state.lastSeq}
+            </Button>
+          )}
+        </div>
+      )}
       {hasThread && (
         <Composer
           running={state.turnStatus === "running"}

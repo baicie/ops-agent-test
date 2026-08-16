@@ -122,7 +122,7 @@ impl IncidentContext {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TurnInput {
     pub content: String,
     pub incident_context: Option<IncidentContext>,

@@ -3,7 +3,7 @@ use std::str::FromStr;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -30,6 +30,7 @@ pub(crate) fn api_router(state: ServerState) -> Router {
         .route("/threads", get(list_threads).post(create_thread))
         .route("/threads/{thread_id}", get(get_thread))
         .route("/threads/{thread_id}/turns", post(create_turn))
+        .route("/threads/{thread_id}/forks", post(fork_thread))
         .route("/threads/{thread_id}/events", get(sse::thread_events))
         .route("/threads/{thread_id}/topology", get(get_topology))
         .route(
@@ -39,6 +40,8 @@ pub(crate) fn api_router(state: ServerState) -> Router {
         .route("/artifacts/{sha256}", get(get_artifact))
         .route("/approvals/{approval_id}", post(resolve_approval))
         .route("/turns/{turn_id}/interrupt", post(interrupt_turn))
+        .route("/turns/{turn_id}/resume", post(resume_turn))
+        .route("/turns/{turn_id}/recovery", get(get_recovery))
         .fallback(api_not_found);
     Router::new()
         .route("/healthz", get(health))
@@ -307,9 +310,8 @@ async fn resolve_approval(
     let approval_id = parse_id::<ApprovalId>("approval", &approval_id)?;
     state
         .runtime
-        .policy()
-        .broker()
-        .resolve(&approval_id, request.approved)?;
+        .resolve_approval(&approval_id, request.approved)
+        .await?;
     Ok(Json(json!({
         "approval_id": approval_id,
         "status": if request.approved { "approved" } else { "rejected" }
@@ -332,6 +334,112 @@ async fn interrupt_turn(
         StatusCode::ACCEPTED,
         Json(json!({"turn_id": turn_id, "status": "cancelling"})),
     ))
+}
+
+#[derive(Deserialize)]
+struct ForkRequest {
+    at_seq: u64,
+    #[serde(default)]
+    title: Option<String>,
+}
+
+async fn fork_thread(
+    State(state): State<ServerState>,
+    Path(thread_id): Path<String>,
+    Json(request): Json<ForkRequest>,
+) -> ApiResult<impl IntoResponse> {
+    let thread_id = parse_id::<ThreadId>("thread", &thread_id)?;
+    let created = state
+        .runtime
+        .fork_thread(&thread_id, request.at_seq, request.title.clone())
+        .await?;
+    let _ = state
+        .event_hub
+        .sender(&created.thread_id)
+        .send(created.clone());
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "id": created.thread_id,
+            "parent_thread_id": thread_id,
+            "forked_at_seq": request.at_seq,
+            "title": request.title,
+        })),
+    ))
+}
+
+async fn resume_turn(
+    State(state): State<ServerState>,
+    Path(turn_id): Path<String>,
+    headers: HeaderMap,
+) -> ApiResult<impl IntoResponse> {
+    let turn_id = parse_id::<TurnId>("turn", &turn_id)?;
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| ApiError::bad_request("Idempotency-Key is required"))?;
+    let report = state.runtime.recovery_report(&turn_id).await?;
+    if report.resume_policy == crate::store::ResumePolicy::Reconcile {
+        return Err(ApiError::from(OpsCodexError::NeedsReconciliation(
+            report.user_action,
+        )));
+    }
+    let thread_id = report.thread_id.clone();
+    let cancellation = CancellationToken::new();
+    let inserted = state
+        .active_turns
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(thread_id.clone(), turn_id.clone(), cancellation.clone());
+    if !inserted {
+        return Err(ApiError::conflict("thread already has an active turn"));
+    }
+    let runtime = state.runtime.clone();
+    let events = state.event_hub.sender(&thread_id);
+    let active_turns = state.active_turns.clone();
+    let task_thread_id = thread_id.clone();
+    let task_turn_id = turn_id.clone();
+    tokio::spawn(async move {
+        let result = runtime
+            .resume_turn(
+                task_turn_id.clone(),
+                events,
+                cancellation,
+                Some(idempotency_key),
+            )
+            .await;
+        if let Err(error) = result {
+            tracing::warn!(
+                thread_id = %task_thread_id,
+                turn_id = %task_turn_id,
+                error = %error,
+                "resume finished with an error"
+            );
+        }
+        active_turns
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&task_thread_id, &task_turn_id);
+    });
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "turn_id": turn_id,
+            "status": "resuming",
+            "recovery": report,
+        })),
+    ))
+}
+
+async fn get_recovery(
+    State(state): State<ServerState>,
+    Path(turn_id): Path<String>,
+) -> ApiResult<impl IntoResponse> {
+    let turn_id = parse_id::<TurnId>("turn", &turn_id)?;
+    Ok(Json(state.runtime.recovery_report(&turn_id).await?))
 }
 
 async fn get_topology(
@@ -476,6 +584,7 @@ impl From<OpsCodexError> for ApiError {
             OpsCodexError::TurnAlreadyRunning => {
                 Self::conflict("thread already has an active turn")
             }
+            OpsCodexError::NeedsReconciliation(message) => Self::conflict(message),
             OpsCodexError::Protocol(message) => Self::bad_request(message),
             OpsCodexError::Policy(message) => Self {
                 status: StatusCode::FORBIDDEN,

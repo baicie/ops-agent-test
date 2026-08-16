@@ -4,6 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chrono::Utc;
 use serde_json::{Value, json};
 use tokio::sync::{Semaphore, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -18,8 +19,15 @@ use crate::{
     extensions::{ExtensionCatalog, SkillCatalog},
     model::{ModelEvent, ModelOutput, ModelProvider, ModelRequest, ModelResponse},
     policy::{PolicyDecision, PolicyEngine},
-    runtime::{ContextBudget, EventId, TurnInput},
-    store::{AppendEvent, EventStore},
+    runtime::{
+        ContextBudget, EventId, TurnInput, TurnStatus, classify_checkpoint, local_summary,
+        pending_operation_id,
+    },
+    store::{
+        AppendEvent, ApprovalStatus, CheckpointPhase, CheckpointRecord, DurableApproval,
+        EventStore, Lease, PendingOperation, ResumePolicy, TurnRecord, approval_request_hash,
+        context_input_hash,
+    },
     telemetry::RuntimeMetrics,
     tools::{ToolInvocation, ToolOutput, ToolRegistry},
     workspace::WorkspaceCatalog,
@@ -70,6 +78,8 @@ pub struct RuntimeConfig {
     pub context_items: usize,
     pub context: ContextBudget,
     pub inline_artifact_bytes: usize,
+    pub approval_ttl: Duration,
+    pub lease_ttl: Duration,
 }
 
 impl Default for RuntimeConfig {
@@ -82,6 +92,8 @@ impl Default for RuntimeConfig {
             context_items: 100,
             context: ContextBudget::default(),
             inline_artifact_bytes: INLINE_ARTIFACT_BYTES,
+            approval_ttl: Duration::from_secs(3600),
+            lease_ttl: Duration::from_secs(30),
         }
     }
 }
@@ -104,8 +116,23 @@ impl From<&RuntimeSettings> for RuntimeConfig {
             context_items: settings.context_items,
             context,
             inline_artifact_bytes: settings.inline_artifact_bytes,
+            approval_ttl: Duration::from_secs(3600),
+            lease_ttl: Duration::from_secs(30),
         }
     }
+}
+
+impl RuntimeConfig {
+    pub fn with_store_timeouts(mut self, approval_ttl: Duration, lease_ttl: Duration) -> Self {
+        self.approval_ttl = approval_ttl;
+        self.lease_ttl = lease_ttl;
+        self
+    }
+}
+
+enum TurnStart {
+    Fresh(TurnInput),
+    Resume(crate::store::RecoveryReport),
 }
 
 pub struct AgentRuntime {
@@ -123,6 +150,7 @@ pub struct AgentRuntime {
     extensions: Arc<ExtensionCatalog>,
     workspace_skills: Arc<HashMap<String, SkillCatalog>>,
     skill_budget_bytes: usize,
+    owner_id: String,
 }
 
 impl AgentRuntime {
@@ -148,6 +176,7 @@ impl AgentRuntime {
             extensions: Arc::new(ExtensionCatalog::default()),
             workspace_skills: Arc::new(HashMap::new()),
             skill_budget_bytes: 4 * 1024,
+            owner_id: uuid::Uuid::now_v7().to_string(),
         }
     }
 
@@ -238,6 +267,160 @@ impl AgentRuntime {
         summaries
     }
 
+    pub async fn recover(&self) -> Result<Vec<crate::store::RecoveryReport>> {
+        let now = Utc::now();
+        for mut approval in self.store.list_pending_approvals().await? {
+            if approval.expires_at.is_some_and(|expires| expires <= now) {
+                approval.status = ApprovalStatus::Expired;
+                self.store.put_approval(approval).await?;
+            }
+        }
+        let mut reports = Vec::new();
+        for turn in self.store.list_open_turns().await? {
+            let _ = self.store.force_release_turn_lease(&turn.id).await;
+            let Some(checkpoint) = self.store.last_checkpoint(&turn.id).await? else {
+                let now = Utc::now();
+                self.store
+                    .upsert_turn(TurnRecord {
+                        id: turn.id.clone(),
+                        thread_id: turn.thread_id.clone(),
+                        status: TurnStatus::Interrupted,
+                        active_lease_id: None,
+                        last_checkpoint_id: turn.last_checkpoint_id.clone(),
+                        created_at: turn.created_at,
+                        updated_at: now,
+                    })
+                    .await?;
+                continue;
+            };
+            let events = self.store.events_after(&turn.thread_id, 0).await?;
+            let report = classify_checkpoint(&checkpoint, &events);
+            self.store
+                .upsert_turn(TurnRecord {
+                    id: turn.id.clone(),
+                    thread_id: turn.thread_id.clone(),
+                    status: report.status,
+                    active_lease_id: None,
+                    last_checkpoint_id: Some(checkpoint.checkpoint_id.clone()),
+                    created_at: turn.created_at,
+                    updated_at: Utc::now(),
+                })
+                .await?;
+            reports.push(report);
+        }
+        Ok(reports)
+    }
+
+    pub async fn recovery_report(&self, turn_id: &TurnId) -> Result<crate::store::RecoveryReport> {
+        let turn = self
+            .store
+            .get_turn(turn_id)
+            .await?
+            .ok_or_else(|| OpsCodexError::NotFound(format!("turn {turn_id}")))?;
+        let checkpoint = self
+            .store
+            .last_checkpoint(turn_id)
+            .await?
+            .ok_or_else(|| OpsCodexError::NotFound(format!("checkpoint for turn {turn_id}")))?;
+        let events = self.store.events_after(&turn.thread_id, 0).await?;
+        Ok(classify_checkpoint(&checkpoint, &events))
+    }
+
+    pub async fn resume_turn(
+        &self,
+        turn_id: TurnId,
+        events: broadcast::Sender<EventEnvelope>,
+        cancellation: CancellationToken,
+        idempotency_key: Option<String>,
+    ) -> Result<crate::store::RecoveryReport> {
+        let report = self.recovery_report(&turn_id).await?;
+        if report.resume_policy == ResumePolicy::Reconcile {
+            return Err(OpsCodexError::NeedsReconciliation(
+                report.user_action.clone(),
+            ));
+        }
+        if let Some(key) = idempotency_key {
+            let payload = serde_json::to_string(&report).unwrap_or_default();
+            if let Some(existing) = self.store.remember_resume(&key, &turn_id, &payload).await? {
+                return serde_json::from_str(&existing).map_err(|error| {
+                    OpsCodexError::Storage(format!("invalid resume payload: {error}"))
+                });
+            }
+        }
+        let thread_id = report.thread_id.clone();
+        let _permit = self
+            .turn_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| OpsCodexError::Cancelled)?;
+        let _active = ActiveThreadGuard::enter(self.active_threads.clone(), thread_id.clone())?;
+        let lease = self
+            .store
+            .acquire_lease(&turn_id, &thread_id, &self.owner_id, self.config.lease_ttl)
+            .await?;
+        let result = self
+            .run_turn_inner(
+                &thread_id,
+                &turn_id,
+                TurnStart::Resume(report.clone()),
+                &events,
+                cancellation,
+                &lease,
+            )
+            .await;
+        let _ = self
+            .store
+            .release_lease(&lease.lease_id, lease.fencing_token)
+            .await;
+        result?;
+        Ok(report)
+    }
+
+    pub async fn resolve_approval(
+        &self,
+        id: &crate::runtime::ApprovalId,
+        approved: bool,
+    ) -> Result<()> {
+        if let Some(mut durable) = self.store.get_approval(id).await? {
+            if durable.status != ApprovalStatus::Pending {
+                return Err(OpsCodexError::Policy(format!(
+                    "approval {id} is {}",
+                    durable.status.as_str()
+                )));
+            }
+            if durable
+                .expires_at
+                .is_some_and(|expires| expires <= Utc::now())
+            {
+                durable.status = ApprovalStatus::Expired;
+                self.store.put_approval(durable).await?;
+                let _ = self.policy.broker().resolve(id, false);
+                return Err(OpsCodexError::Policy(format!("approval {id} expired")));
+            }
+            durable.status = if approved {
+                ApprovalStatus::Approved
+            } else {
+                ApprovalStatus::Rejected
+            };
+            self.store.put_approval(durable).await?;
+            return match self.policy.broker().resolve(id, approved) {
+                Ok(()) | Err(OpsCodexError::NotFound(_)) => Ok(()),
+                Err(error) => Err(error),
+            };
+        }
+        self.policy.broker().resolve(id, approved)
+    }
+
+    pub async fn fork_thread(
+        &self,
+        thread_id: &ThreadId,
+        at_seq: u64,
+        title: Option<String>,
+    ) -> Result<EventEnvelope> {
+        self.store.fork_thread(thread_id, at_seq, title).await
+    }
+
     fn tools_for(&self, workspace: &WorkspaceId) -> Result<&ToolRegistry> {
         if self.workspace_tools.is_empty() {
             return Ok(&self.tools);
@@ -268,8 +451,55 @@ impl AgentRuntime {
                 }
             }?;
             let _active = ActiveThreadGuard::enter(self.active_threads.clone(), thread_id.clone())?;
-            self.run_turn_inner(&thread_id, &turn_id, input, &events, cancellation.clone())
-                .await
+            let lease = self
+                .store
+                .acquire_lease(&turn_id, &thread_id, &self.owner_id, self.config.lease_ttl)
+                .await?;
+            let now = Utc::now();
+            self.store
+                .upsert_turn(TurnRecord {
+                    id: turn_id.clone(),
+                    thread_id: thread_id.clone(),
+                    status: TurnStatus::Running,
+                    active_lease_id: Some(lease.lease_id.clone()),
+                    last_checkpoint_id: None,
+                    created_at: now,
+                    updated_at: now,
+                })
+                .await?;
+            let result = self
+                .run_turn_inner(
+                    &thread_id,
+                    &turn_id,
+                    TurnStart::Fresh(input),
+                    &events,
+                    cancellation.clone(),
+                    &lease,
+                )
+                .await;
+            let status = match &result {
+                Ok(()) => TurnStatus::Completed,
+                Err(OpsCodexError::Cancelled) => TurnStatus::Cancelled,
+                Err(OpsCodexError::NeedsReconciliation(_)) => TurnStatus::NeedsReconciliation,
+                Err(_) => TurnStatus::Failed,
+            };
+            let _ = self
+                .store
+                .upsert_turn(TurnRecord {
+                    id: turn_id.clone(),
+                    thread_id: thread_id.clone(),
+                    status,
+                    active_lease_id: None,
+                    last_checkpoint_id: None,
+                    created_at: now,
+                    updated_at: Utc::now(),
+                })
+                .await;
+            let _ = self
+                .store
+                .release_lease(&lease.lease_id, lease.fencing_token)
+                .await;
+            result
         }
         .await;
         tracing::debug!(
@@ -317,9 +547,10 @@ impl AgentRuntime {
         &self,
         thread_id: &ThreadId,
         turn_id: &TurnId,
-        input: TurnInput,
+        start: TurnStart,
         events: &broadcast::Sender<EventEnvelope>,
         cancellation: CancellationToken,
+        lease: &Lease,
     ) -> Result<()> {
         let thread = self.store.get_thread(thread_id).await?;
         let workspace_id = thread.workspace_id;
@@ -327,34 +558,98 @@ impl AgentRuntime {
             self.workspaces.require(&workspace_id)?;
         }
         let tools = self.tools_for(&workspace_id)?.clone();
+        let skill_input = match &start {
+            TurnStart::Fresh(input) => input.clone(),
+            TurnStart::Resume(_) => TurnInput {
+                content: String::new(),
+                incident_context: None,
+            },
+        };
         let instructions = compose_instructions(
             SYSTEM_INSTRUCTIONS,
             self.workspace_skills.get(workspace_id.as_str()),
-            &input,
+            &skill_input,
             self.skill_budget_bytes,
         );
-        self.emit(
-            thread_id,
-            Some(turn_id.clone()),
-            None,
-            RuntimeEvent::UserMessage {
-                content: input.content.clone(),
-                incident_context: input.incident_context.clone(),
-            },
-            events,
-        )
-        .await?;
-        self.emit(
-            thread_id,
-            Some(turn_id.clone()),
-            None,
-            RuntimeEvent::TurnStarted,
-            events,
-        )
-        .await?;
-
         let mut last_event_id: Option<EventId> = None;
+        let mut step = 0_u32;
+        match start {
+            TurnStart::Fresh(input) => {
+                self.emit(
+                    thread_id,
+                    Some(turn_id.clone()),
+                    None,
+                    RuntimeEvent::UserMessage {
+                        content: input.content.clone(),
+                        incident_context: input.incident_context.clone(),
+                    },
+                    events,
+                )
+                .await?;
+                self.emit(
+                    thread_id,
+                    Some(turn_id.clone()),
+                    None,
+                    RuntimeEvent::TurnStarted,
+                    events,
+                )
+                .await?;
+                self.write_checkpoint(
+                    thread_id,
+                    turn_id,
+                    step,
+                    CheckpointPhase::Queued,
+                    ResumePolicy::ReplayModel,
+                    None,
+                    lease,
+                )
+                .await?;
+            }
+            TurnStart::Resume(report) => {
+                if report.resume_policy == ResumePolicy::Reconcile {
+                    return Err(OpsCodexError::NeedsReconciliation(report.user_action));
+                }
+                if let Some(checkpoint) = &report.checkpoint {
+                    step = checkpoint.step;
+                }
+                if matches!(
+                    report.resume_policy,
+                    ResumePolicy::RetryObserve | ResumePolicy::WaitApproval
+                ) && let Some(operation) = report
+                    .checkpoint
+                    .as_ref()
+                    .and_then(|checkpoint| checkpoint.pending_operation.clone())
+                {
+                    last_event_id = Some(
+                        self.resume_pending_tool(
+                            thread_id,
+                            turn_id,
+                            &workspace_id,
+                            &tools,
+                            events,
+                            cancellation.clone(),
+                            lease,
+                            operation,
+                            report.resume_policy,
+                        )
+                        .await?,
+                    );
+                }
+            }
+        }
+
         for _ in 0..self.config.max_steps {
+            self.maybe_compact(thread_id, turn_id, events).await?;
+            self.write_checkpoint(
+                thread_id,
+                turn_id,
+                step,
+                CheckpointPhase::ModelRunning,
+                ResumePolicy::ReplayModel,
+                None,
+                lease,
+            )
+            .await?;
             let request = ModelRequest {
                 instructions: instructions.clone(),
                 input: self
@@ -425,6 +720,8 @@ impl AgentRuntime {
                             tools: &tools,
                             events,
                             causation_id: last_event_id.clone(),
+                            lease,
+                            step,
                         };
                         last_event_id = Some(
                             self.execute_tool(
@@ -433,6 +730,7 @@ impl AgentRuntime {
                                 name,
                                 arguments,
                                 cancellation.clone(),
+                                false,
                             )
                             .await?,
                         );
@@ -440,6 +738,16 @@ impl AgentRuntime {
                 }
             }
             if !called_tool {
+                self.write_checkpoint(
+                    thread_id,
+                    turn_id,
+                    step,
+                    CheckpointPhase::Completed,
+                    ResumePolicy::None,
+                    None,
+                    lease,
+                )
+                .await?;
                 self.emit(
                     thread_id,
                     Some(turn_id.clone()),
@@ -450,6 +758,7 @@ impl AgentRuntime {
                 .await?;
                 return Ok(());
             }
+            step = step.saturating_add(1);
         }
         Err(OpsCodexError::MaxStepsExceeded)
     }
@@ -538,21 +847,25 @@ impl AgentRuntime {
         name: String,
         arguments: Value,
         cancellation: CancellationToken,
+        already_authorized: bool,
     ) -> Result<EventId> {
-        let proposed = self
-            .emit(
-                context.thread_id,
-                Some(context.turn_id.clone()),
-                context.causation_id.clone(),
-                RuntimeEvent::ToolProposed {
-                    call_id: call_id.clone(),
-                    tool: name.clone(),
-                    arguments: arguments.clone(),
-                },
-                context.events,
-            )
-            .await?;
-        let mut causation = Some(proposed.event_id.clone());
+        let mut causation = context.causation_id.clone();
+        if !already_authorized {
+            let proposed = self
+                .emit(
+                    context.thread_id,
+                    Some(context.turn_id.clone()),
+                    causation.clone(),
+                    RuntimeEvent::ToolProposed {
+                        call_id: call_id.clone(),
+                        tool: name.clone(),
+                        arguments: arguments.clone(),
+                    },
+                    context.events,
+                )
+                .await?;
+            causation = Some(proposed.event_id.clone());
+        }
 
         let descriptor = match context.tools.descriptor(&name) {
             Ok(descriptor) => descriptor,
@@ -562,142 +875,234 @@ impl AgentRuntime {
                     .await;
             }
         };
-        match self.policy.evaluate_capability(&descriptor) {
-            PolicyDecision::Deny => {
-                causation = Some(
-                    self.emit(
-                        context.thread_id,
-                        Some(context.turn_id.clone()),
-                        causation,
-                        RuntimeEvent::ToolAuthorized {
-                            call_id: call_id.clone(),
-                            tool: name.clone(),
-                            decision: "deny".into(),
-                        },
-                        context.events,
-                    )
-                    .await?
-                    .event_id,
-                );
-                return self
-                    .emit_tool_error(
-                        context,
-                        causation,
-                        call_id,
-                        name,
-                        arguments,
-                        OpsCodexError::Policy("tool is forbidden".into()),
-                    )
-                    .await;
-            }
-            PolicyDecision::Ask => {
-                let (approval_id, decision) = self.policy.broker().request_with_hash(
-                    name.clone(),
-                    arguments.clone(),
-                    descriptor.provenance.schema_hash.clone(),
-                );
-                causation = Some(
-                    self.emit(
-                        context.thread_id,
-                        Some(context.turn_id.clone()),
-                        causation,
-                        RuntimeEvent::ApprovalRequired {
+        let pending = PendingOperation {
+            operation_id: pending_operation_id(context.turn_id, &call_id),
+            call_id: call_id.clone(),
+            tool: name.clone(),
+            arguments: arguments.clone(),
+            effect: descriptor.effect.as_str().to_owned(),
+            recovery: descriptor.recovery.map(|mode| match mode {
+                crate::extensions::RecoveryMode::NoneNeeded => "none_needed".into(),
+                crate::extensions::RecoveryMode::Idempotent => "idempotent".into(),
+                crate::extensions::RecoveryMode::NeedsReconciliation => {
+                    "needs_reconciliation".into()
+                }
+            }),
+        };
+        if !already_authorized {
+            match self.policy.evaluate_capability(&descriptor) {
+                PolicyDecision::Deny => {
+                    causation = Some(
+                        self.emit(
+                            context.thread_id,
+                            Some(context.turn_id.clone()),
+                            causation,
+                            RuntimeEvent::ToolAuthorized {
+                                call_id: call_id.clone(),
+                                tool: name.clone(),
+                                decision: "deny".into(),
+                            },
+                            context.events,
+                        )
+                        .await?
+                        .event_id,
+                    );
+                    return self
+                        .emit_tool_error(
+                            context,
+                            causation,
+                            call_id,
+                            name,
+                            arguments,
+                            OpsCodexError::Policy("tool is forbidden".into()),
+                        )
+                        .await;
+                }
+                PolicyDecision::Ask => {
+                    let request_hash = approval_request_hash(
+                        &name,
+                        &arguments,
+                        Some(descriptor.provenance.schema_hash.as_str()),
+                    );
+                    let (approval_id, decision) = self.policy.broker().request_with_hash(
+                        name.clone(),
+                        arguments.clone(),
+                        descriptor.provenance.schema_hash.clone(),
+                    );
+                    let expires_at = Utc::now()
+                        + chrono::Duration::from_std(self.config.approval_ttl)
+                            .unwrap_or(chrono::Duration::seconds(3600));
+                    self.store
+                        .put_approval(DurableApproval {
                             approval_id: approval_id.clone(),
+                            thread_id: Some(context.thread_id.clone()),
+                            turn_id: Some(context.turn_id.clone()),
                             tool: name.clone(),
                             arguments: arguments.clone(),
-                        },
-                        context.events,
-                    )
-                    .await?
-                    .event_id,
-                );
-                let approved = tokio::select! {
-                    _ = cancellation.cancelled() => return Err(OpsCodexError::Cancelled),
-                    result = decision => result.map_err(|_| OpsCodexError::Policy("approval channel closed".into()))?,
-                };
-                causation = Some(
-                    self.emit(
+                            request_hash,
+                            schema_hash: Some(descriptor.provenance.schema_hash.clone()),
+                            status: ApprovalStatus::Pending,
+                            expires_at: Some(expires_at),
+                        })
+                        .await?;
+                    self.write_checkpoint(
                         context.thread_id,
-                        Some(context.turn_id.clone()),
-                        causation,
-                        RuntimeEvent::ApprovalResolved {
-                            approval_id,
-                            approved,
-                        },
-                        context.events,
+                        context.turn_id,
+                        context.step,
+                        CheckpointPhase::WaitingApproval,
+                        ResumePolicy::WaitApproval,
+                        Some(pending.clone()),
+                        context.lease,
                     )
-                    .await?
-                    .event_id,
-                );
-                let decision = if approved { "allow" } else { "deny" };
-                causation = Some(
-                    self.emit(
-                        context.thread_id,
-                        Some(context.turn_id.clone()),
-                        causation,
-                        RuntimeEvent::ToolAuthorized {
-                            call_id: call_id.clone(),
-                            tool: name.clone(),
-                            decision: decision.into(),
-                        },
-                        context.events,
-                    )
-                    .await?
-                    .event_id,
-                );
-                if !approved {
-                    return self
-                        .emit_tool_error(
-                            context,
+                    .await?;
+                    causation = Some(
+                        self.emit(
+                            context.thread_id,
+                            Some(context.turn_id.clone()),
                             causation,
-                            call_id,
-                            name,
-                            arguments,
-                            OpsCodexError::Policy("approval rejected".into()),
+                            RuntimeEvent::ApprovalRequired {
+                                approval_id: approval_id.clone(),
+                                tool: name.clone(),
+                                arguments: arguments.clone(),
+                            },
+                            context.events,
                         )
-                        .await;
-                }
-                let current = match context.tools.descriptor(&name) {
-                    Ok(current) => current,
-                    Err(error) => {
+                        .await?
+                        .event_id,
+                    );
+                    let approved = tokio::select! {
+                        _ = cancellation.cancelled() => return Err(OpsCodexError::Cancelled),
+                        _ = tokio::time::sleep(self.config.approval_ttl) => {
+                            let mut expired = self.store.get_approval(&approval_id).await?.unwrap_or(DurableApproval {
+                                approval_id: approval_id.clone(),
+                                thread_id: Some(context.thread_id.clone()),
+                                turn_id: Some(context.turn_id.clone()),
+                                tool: name.clone(),
+                                arguments: arguments.clone(),
+                                request_hash: String::new(),
+                                schema_hash: Some(descriptor.provenance.schema_hash.clone()),
+                                status: ApprovalStatus::Expired,
+                                expires_at: Some(expires_at),
+                            });
+                            expired.status = ApprovalStatus::Expired;
+                            let _ = self.store.put_approval(expired).await;
+                            false
+                        }
+                        result = decision => result.map_err(|_| OpsCodexError::Policy("approval channel closed".into()))?,
+                    };
+                    if let Some(mut durable) = self.store.get_approval(&approval_id).await? {
+                        durable.status = if approved {
+                            ApprovalStatus::Approved
+                        } else if durable.status == ApprovalStatus::Expired {
+                            ApprovalStatus::Expired
+                        } else {
+                            ApprovalStatus::Rejected
+                        };
+                        let _ = self.store.put_approval(durable).await;
+                    }
+                    causation = Some(
+                        self.emit(
+                            context.thread_id,
+                            Some(context.turn_id.clone()),
+                            causation,
+                            RuntimeEvent::ApprovalResolved {
+                                approval_id,
+                                approved,
+                            },
+                            context.events,
+                        )
+                        .await?
+                        .event_id,
+                    );
+                    let decision = if approved { "allow" } else { "deny" };
+                    causation = Some(
+                        self.emit(
+                            context.thread_id,
+                            Some(context.turn_id.clone()),
+                            causation,
+                            RuntimeEvent::ToolAuthorized {
+                                call_id: call_id.clone(),
+                                tool: name.clone(),
+                                decision: decision.into(),
+                            },
+                            context.events,
+                        )
+                        .await?
+                        .event_id,
+                    );
+                    if !approved {
                         return self
-                            .emit_tool_error(context, causation, call_id, name, arguments, error)
+                            .emit_tool_error(
+                                context,
+                                causation,
+                                call_id,
+                                name,
+                                arguments,
+                                OpsCodexError::Policy("approval rejected".into()),
+                            )
                             .await;
                     }
-                };
-                if current.provenance.schema_hash != descriptor.provenance.schema_hash {
-                    return self
-                        .emit_tool_error(
-                            context,
+                    let current = match context.tools.descriptor(&name) {
+                        Ok(current) => current,
+                        Err(error) => {
+                            return self
+                                .emit_tool_error(
+                                    context, causation, call_id, name, arguments, error,
+                                )
+                                .await;
+                        }
+                    };
+                    if current.provenance.schema_hash != descriptor.provenance.schema_hash {
+                        return self
+                            .emit_tool_error(
+                                context,
+                                causation,
+                                call_id,
+                                name,
+                                arguments,
+                                OpsCodexError::Policy(
+                                    "capability schema changed; approval invalidated".into(),
+                                ),
+                            )
+                            .await;
+                    }
+                }
+                PolicyDecision::Allow => {
+                    causation = Some(
+                        self.emit(
+                            context.thread_id,
+                            Some(context.turn_id.clone()),
                             causation,
-                            call_id,
-                            name,
-                            arguments,
-                            OpsCodexError::Policy(
-                                "capability schema changed; approval invalidated".into(),
-                            ),
+                            RuntimeEvent::ToolAuthorized {
+                                call_id: call_id.clone(),
+                                tool: name.clone(),
+                                decision: "allow".into(),
+                            },
+                            context.events,
                         )
-                        .await;
+                        .await?
+                        .event_id,
+                    );
                 }
             }
-            PolicyDecision::Allow => {
-                causation = Some(
-                    self.emit(
-                        context.thread_id,
-                        Some(context.turn_id.clone()),
-                        causation,
-                        RuntimeEvent::ToolAuthorized {
-                            call_id: call_id.clone(),
-                            tool: name.clone(),
-                            decision: "allow".into(),
-                        },
-                        context.events,
-                    )
-                    .await?
-                    .event_id,
-                );
-            }
         }
+
+        let resume_policy =
+            if crate::runtime::tool_is_retryable(descriptor.effect, descriptor.recovery) {
+                ResumePolicy::RetryObserve
+            } else {
+                ResumePolicy::Reconcile
+            };
+        self.write_checkpoint(
+            context.thread_id,
+            context.turn_id,
+            context.step,
+            CheckpointPhase::ToolRunning,
+            resume_policy,
+            Some(pending),
+            context.lease,
+        )
+        .await?;
 
         causation = Some(
             self.emit(
@@ -834,7 +1239,7 @@ impl AgentRuntime {
             );
             model_content = model_tool_output(true, &evidence, &content);
         }
-        Ok(self
+        let event_id = self
             .emit(
                 context.thread_id,
                 Some(context.turn_id.clone()),
@@ -849,7 +1254,18 @@ impl AgentRuntime {
                 context.events,
             )
             .await?
-            .event_id)
+            .event_id;
+        self.write_checkpoint(
+            context.thread_id,
+            context.turn_id,
+            context.step,
+            CheckpointPhase::ToolCompleted,
+            ResumePolicy::SkipCompletedTool,
+            None,
+            context.lease,
+        )
+        .await?;
+        Ok(event_id)
     }
 
     async fn emit(
@@ -882,6 +1298,275 @@ impl AgentRuntime {
                 Err(error)
             }
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn write_checkpoint(
+        &self,
+        thread_id: &ThreadId,
+        turn_id: &TurnId,
+        step: u32,
+        phase: CheckpointPhase,
+        resume_policy: ResumePolicy,
+        pending_operation: Option<PendingOperation>,
+        lease: &Lease,
+    ) -> Result<()> {
+        self.store
+            .refresh_lease(&lease.lease_id, lease.fencing_token, self.config.lease_ttl)
+            .await?;
+        let items = self
+            .store
+            .model_context(thread_id, &self.config.context)
+            .await
+            .unwrap_or_default();
+        self.store
+            .put_checkpoint(CheckpointRecord {
+                checkpoint_id: uuid::Uuid::now_v7().to_string(),
+                turn_id: turn_id.clone(),
+                thread_id: thread_id.clone(),
+                step,
+                phase,
+                context_input_hash: Some(context_input_hash(&items)),
+                pending_operation,
+                last_committed_seq: self.store.last_seq(thread_id).await.unwrap_or(0),
+                resume_policy,
+                created_at: Utc::now(),
+            })
+            .await
+    }
+
+    async fn maybe_compact(
+        &self,
+        thread_id: &ThreadId,
+        turn_id: &TurnId,
+        events: &broadcast::Sender<EventEnvelope>,
+    ) -> Result<()> {
+        let history = self.store.events_after(thread_id, 0).await?;
+        let full = crate::store::model_items_from_events(&history);
+        let bounded = crate::runtime::build_model_context(full.clone(), &self.config.context);
+        if bounded.len() >= full.len() {
+            return Ok(());
+        }
+        let drop_count = full.len() - bounded.len();
+        let mut counted = 0usize;
+        let mut start = None;
+        let mut end = None;
+        let mut evidence_ids = Vec::new();
+        let mut item_ids = Vec::new();
+        let mut covered: Vec<crate::runtime::EventEnvelope> = Vec::new();
+        for envelope in &history {
+            let contributes = matches!(
+                envelope.event,
+                RuntimeEvent::UserMessage { .. }
+                    | RuntimeEvent::AssistantCompleted { .. }
+                    | RuntimeEvent::ToolStarted { .. }
+                    | RuntimeEvent::ToolProposed { .. }
+                    | RuntimeEvent::ToolCompleted { .. }
+            );
+            if !contributes {
+                continue;
+            }
+            if counted >= drop_count {
+                break;
+            }
+            start.get_or_insert(envelope.seq);
+            end = Some(envelope.seq);
+            item_ids.push(envelope.event_id.to_string());
+            if let RuntimeEvent::ToolCompleted { evidence, .. } = &envelope.event
+                && let Some(id) = &evidence.evidence_id
+            {
+                evidence_ids.push(id.to_string());
+            }
+            covered.push(envelope.clone());
+            counted += 1;
+        }
+        let (Some(covers_seq_start), Some(covers_seq_end)) = (start, end) else {
+            return Ok(());
+        };
+        if history.iter().any(|envelope| {
+            matches!(
+                &envelope.event,
+                RuntimeEvent::ContextCompacted {
+                    covers_seq_start: existing_start,
+                    covers_seq_end: existing_end,
+                    ..
+                } if *existing_start <= covers_seq_start && *existing_end >= covers_seq_end
+            )
+        }) {
+            return Ok(());
+        }
+        let summary = local_summary(&covered);
+        let _ = self
+            .emit(
+                thread_id,
+                Some(turn_id.clone()),
+                None,
+                RuntimeEvent::ContextCompacted {
+                    summary_id: uuid::Uuid::now_v7().to_string(),
+                    covers_seq_start,
+                    covers_seq_end,
+                    source_item_ids: item_ids,
+                    source_evidence_ids: evidence_ids,
+                    input_hash: context_input_hash(&full),
+                    model_provider: Some("local".into()),
+                    model: Some("deterministic-suffix".into()),
+                    prompt_version: Some("v0.5".into()),
+                    summary,
+                },
+                events,
+            )
+            .await;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn resume_pending_tool(
+        &self,
+        thread_id: &ThreadId,
+        turn_id: &TurnId,
+        workspace_id: &WorkspaceId,
+        tools: &ToolRegistry,
+        events: &broadcast::Sender<EventEnvelope>,
+        cancellation: CancellationToken,
+        lease: &Lease,
+        operation: PendingOperation,
+        policy: ResumePolicy,
+    ) -> Result<EventId> {
+        if policy == ResumePolicy::WaitApproval {
+            let Some(mut pending) = self.store.approval_for_turn(turn_id).await? else {
+                return Err(OpsCodexError::Policy(
+                    "resume found no durable approval for this turn".into(),
+                ));
+            };
+            if pending
+                .expires_at
+                .is_some_and(|expires| expires <= Utc::now())
+                && pending.status == ApprovalStatus::Pending
+            {
+                pending.status = ApprovalStatus::Expired;
+                self.store.put_approval(pending.clone()).await?;
+            }
+            match pending.status {
+                ApprovalStatus::Approved => {}
+                ApprovalStatus::Rejected | ApprovalStatus::Expired => {
+                    let context = TurnEventContext {
+                        thread_id,
+                        turn_id,
+                        workspace_id,
+                        tools,
+                        events,
+                        causation_id: None,
+                        lease,
+                        step: 0,
+                    };
+                    return self
+                        .emit_tool_error(
+                            &context,
+                            None,
+                            operation.call_id,
+                            operation.tool,
+                            operation.arguments,
+                            OpsCodexError::Policy("approval rejected".into()),
+                        )
+                        .await;
+                }
+                ApprovalStatus::Pending => {
+                    let receiver = self
+                        .policy
+                        .broker()
+                        .restore(crate::policy::PendingApproval {
+                            id: pending.approval_id.clone(),
+                            tool: pending.tool.clone(),
+                            arguments: pending.arguments.clone(),
+                            schema_hash: pending.schema_hash.clone(),
+                        });
+                    let approved = tokio::select! {
+                        _ = cancellation.cancelled() => return Err(OpsCodexError::Cancelled),
+                        result = receiver => result.unwrap_or(false),
+                    };
+                    let mut durable = pending.clone();
+                    durable.status = if approved {
+                        ApprovalStatus::Approved
+                    } else {
+                        ApprovalStatus::Rejected
+                    };
+                    self.store.put_approval(durable.clone()).await?;
+                    let _ = self
+                        .emit(
+                            thread_id,
+                            Some(turn_id.clone()),
+                            None,
+                            RuntimeEvent::ApprovalResolved {
+                                approval_id: durable.approval_id,
+                                approved,
+                            },
+                            events,
+                        )
+                        .await;
+                    if !approved {
+                        let context = TurnEventContext {
+                            thread_id,
+                            turn_id,
+                            workspace_id,
+                            tools,
+                            events,
+                            causation_id: None,
+                            lease,
+                            step: 0,
+                        };
+                        return self
+                            .emit_tool_error(
+                                &context,
+                                None,
+                                operation.call_id,
+                                operation.tool,
+                                operation.arguments,
+                                OpsCodexError::Policy("approval rejected".into()),
+                            )
+                            .await;
+                    }
+                }
+            }
+            let descriptor = tools.descriptor(&operation.tool)?;
+            if pending
+                .schema_hash
+                .as_ref()
+                .is_some_and(|hash| hash != &descriptor.provenance.schema_hash)
+            {
+                return Err(OpsCodexError::Policy(
+                    "capability schema changed; approval invalidated".into(),
+                ));
+            }
+            let current_hash = approval_request_hash(
+                &operation.tool,
+                &operation.arguments,
+                pending.schema_hash.as_deref(),
+            );
+            if current_hash != pending.request_hash {
+                return Err(OpsCodexError::Policy(
+                    "approval request hash mismatch; refusing to execute".into(),
+                ));
+            }
+        }
+        let context = TurnEventContext {
+            thread_id,
+            turn_id,
+            workspace_id,
+            tools,
+            events,
+            causation_id: None,
+            lease,
+            step: 0,
+        };
+        self.execute_tool(
+            &context,
+            operation.call_id,
+            operation.tool,
+            operation.arguments,
+            cancellation,
+            true,
+        )
+        .await
     }
 }
 
@@ -929,6 +1614,8 @@ struct TurnEventContext<'a> {
     tools: &'a ToolRegistry,
     events: &'a broadcast::Sender<EventEnvelope>,
     causation_id: Option<EventId>,
+    lease: &'a Lease,
+    step: u32,
 }
 
 struct ActiveThreadGuard {

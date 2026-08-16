@@ -1,16 +1,34 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 use crate::{
-    Result,
+    OpsCodexError, Result,
     evidence::EvidenceMeta,
     model::ModelItem,
     runtime::{
-        ContextBudget, EventEnvelope, EventId, EvidenceId, ItemId, RuntimeEvent, StreamKind,
-        Thread, ThreadId, TurnId, WorkspaceId,
+        ApprovalId, ContextBudget, EventEnvelope, EventId, EvidenceId, ItemId, RuntimeEvent,
+        StreamKind, Thread, ThreadId, ThreadStatus, TurnId, WorkspaceId,
     },
 };
 
-use super::jsonl::ThreadSummary;
+use super::continuity::{CheckpointRecord, DurableApproval, Lease, TurnRecord};
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ThreadSummary {
+    pub id: ThreadId,
+    pub workspace_id: WorkspaceId,
+    pub status: ThreadStatus,
+    pub title: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_thread_id: Option<ThreadId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_at_seq: Option<u64>,
+}
 
 #[derive(Clone, Debug)]
 pub struct AppendEvent {
@@ -79,4 +97,102 @@ pub trait EventStore: Send + Sync {
         thread_id: &ThreadId,
         evidence_id: &EvidenceId,
     ) -> Result<EvidenceMeta>;
+
+    async fn fork_thread(
+        &self,
+        _thread_id: &ThreadId,
+        _at_seq: u64,
+        _title: Option<String>,
+    ) -> Result<EventEnvelope> {
+        Err(OpsCodexError::Protocol(
+            "thread fork requires the sqlite store".into(),
+        ))
+    }
+
+    async fn thread_lineage(
+        &self,
+        _thread_id: &ThreadId,
+    ) -> Result<(Option<ThreadId>, Option<u64>)> {
+        Ok((None, None))
+    }
+
+    async fn upsert_turn(&self, _record: TurnRecord) -> Result<()> {
+        Ok(())
+    }
+
+    async fn get_turn(&self, _turn_id: &TurnId) -> Result<Option<TurnRecord>> {
+        Ok(None)
+    }
+
+    async fn list_open_turns(&self) -> Result<Vec<TurnRecord>> {
+        Ok(Vec::new())
+    }
+
+    async fn put_checkpoint(&self, _checkpoint: CheckpointRecord) -> Result<()> {
+        Ok(())
+    }
+
+    async fn last_checkpoint(&self, _turn_id: &TurnId) -> Result<Option<CheckpointRecord>> {
+        Ok(None)
+    }
+
+    async fn put_approval(&self, _approval: DurableApproval) -> Result<()> {
+        Ok(())
+    }
+
+    async fn get_approval(&self, _id: &ApprovalId) -> Result<Option<DurableApproval>> {
+        Ok(None)
+    }
+
+    async fn list_pending_approvals(&self) -> Result<Vec<DurableApproval>> {
+        Ok(Vec::new())
+    }
+
+    async fn approval_for_turn(&self, _turn_id: &TurnId) -> Result<Option<DurableApproval>> {
+        Ok(None)
+    }
+
+    async fn acquire_lease(
+        &self,
+        turn_id: &TurnId,
+        thread_id: &ThreadId,
+        owner_id: &str,
+        ttl: Duration,
+    ) -> Result<Lease> {
+        Ok(Lease {
+            lease_id: uuid::Uuid::now_v7().to_string(),
+            turn_id: turn_id.clone(),
+            thread_id: thread_id.clone(),
+            owner_id: owner_id.to_owned(),
+            expires_at: Utc::now()
+                + chrono::Duration::from_std(ttl).unwrap_or(chrono::Duration::seconds(30)),
+            fencing_token: 1,
+        })
+    }
+
+    async fn refresh_lease(
+        &self,
+        _lease_id: &str,
+        _fencing_token: i64,
+        _ttl: Duration,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    async fn release_lease(&self, _lease_id: &str, _fencing_token: i64) -> Result<()> {
+        Ok(())
+    }
+
+    async fn remember_resume(
+        &self,
+        _key: &str,
+        _turn_id: &TurnId,
+        _payload: &str,
+    ) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    async fn force_release_turn_lease(&self, _turn_id: &TurnId) -> Result<()> {
+        Ok(())
+    }
 }

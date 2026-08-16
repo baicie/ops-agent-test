@@ -51,6 +51,8 @@ describe("OpsCodex API client", () => {
       createdAt: "2026-08-14T12:00:00Z",
       updatedAt: "2026-08-14T12:02:00Z",
       workspaceId: null,
+      parentThreadId: null,
+      forkedAtSeq: null,
     });
     expect(fetchMock).toHaveBeenCalledWith(
       "http://localhost:3000/api/v1/threads",

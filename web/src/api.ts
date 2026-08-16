@@ -28,6 +28,7 @@ const EVENT_TYPES: RuntimeEventType[] = [
   "turn_completed",
   "turn_failed",
   "turn_cancelled",
+  "context_compacted",
 ];
 
 const EVENT_TYPE_SET = new Set<string>(EVENT_TYPES);
@@ -59,6 +60,9 @@ export interface OpsApiClient {
   getTopology(threadId: string, workspaceId?: string): Promise<TopologyGraph>;
   startTurn(threadId: string, input: string, incidentContext?: IncidentContext | null): Promise<{ turnId: string; status: string }>;
   interruptTurn(turnId: string): Promise<void>;
+  resumeTurn(turnId: string, idempotencyKey: string): Promise<{ turnId: string; status: string }>;
+  getRecovery(turnId: string): Promise<{ status: string; userAction: string; risk: string; resumePolicy: string; skippedTools: string[] }>;
+  forkThread(threadId: string, atSeq: number, title?: string): Promise<{ id: string; parentThreadId: string; forkedAtSeq: number }>;
   resolveApproval(approvalId: string, approved: boolean): Promise<void>;
   subscribe(
     threadId: string,
@@ -191,6 +195,8 @@ function normalizeThread(value: unknown): ThreadSummary {
     createdAt: asString(thread.created_at) ?? asString(thread.createdAt),
     updatedAt: asString(thread.updated_at) ?? asString(thread.updatedAt),
     workspaceId: asString(thread.workspace_id) ?? asString(thread.workspaceId) ?? null,
+    parentThreadId: asString(thread.parent_thread_id) ?? asString(thread.parentThreadId) ?? null,
+    forkedAtSeq: asNumber(thread.forked_at_seq) ?? asNumber(thread.forkedAtSeq) ?? null,
   };
 }
 
@@ -372,6 +378,46 @@ export function createApiClient(
       await request<unknown>(apiUrl(`/api/v1/turns/${encodeURIComponent(turnId)}/interrupt`), {
         method: "POST",
       });
+    },
+
+    async resumeTurn(turnId, idempotencyKey) {
+      const body = asRecord(
+        await request<unknown>(apiUrl(`/api/v1/turns/${encodeURIComponent(turnId)}/resume`), {
+          method: "POST",
+          headers: { "Idempotency-Key": idempotencyKey },
+        }),
+      );
+      return {
+        turnId: asString(body.turn_id) ?? asString(body.turnId) ?? turnId,
+        status: asString(body.status) ?? "resuming",
+      };
+    },
+
+    async getRecovery(turnId) {
+      const body = asRecord(await request<unknown>(apiUrl(`/api/v1/turns/${encodeURIComponent(turnId)}/recovery`)));
+      return {
+        status: asString(body.status) ?? "interrupted",
+        userAction: asString(body.user_action) ?? asString(body.userAction) ?? "",
+        risk: asString(body.risk) ?? "none",
+        resumePolicy: asString(body.resume_policy) ?? asString(body.resumePolicy) ?? "none",
+        skippedTools: stringList(body.skipped_tools ?? body.skippedTools),
+      };
+    },
+
+    async forkThread(threadId, atSeq, title) {
+      const body = asRecord(
+        await request<unknown>(apiUrl(`/api/v1/threads/${encodeURIComponent(threadId)}/forks`), {
+          method: "POST",
+          body: JSON.stringify({ at_seq: atSeq, title }),
+        }),
+      );
+      const id = asString(body.id);
+      if (!id) throw new Error("The server forked a thread without returning its id.");
+      return {
+        id,
+        parentThreadId: asString(body.parent_thread_id) ?? asString(body.parentThreadId) ?? threadId,
+        forkedAtSeq: asNumber(body.forked_at_seq) ?? asNumber(body.forkedAtSeq) ?? atSeq,
+      };
     },
 
     async resolveApproval(approvalId, approved) {

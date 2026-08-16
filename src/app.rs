@@ -9,7 +9,7 @@ use crate::{
     policy::{ApprovalBroker, PolicyEngine},
     runbook::RunbookCatalog,
     runtime::{AgentRuntime, RuntimeConfig},
-    store::JsonlStore,
+    store::open_store,
     tools::{
         DockerLogsTool, ExecTool, HttpGetTool, K8sEventsTool, K8sGetTool, K8sLogsTool,
         KubernetesClient, LokiLogQueryTool, PromqlTool, RunbookReadTool, RunbookSearchTool,
@@ -20,7 +20,7 @@ use crate::{
 
 pub async fn build_runtime(config: &Config, fake_model: bool) -> Result<Arc<AgentRuntime>> {
     let data_dir = Config::data_dir();
-    let store = Arc::new(JsonlStore::new(data_dir.join("threads")).await?);
+    let store = open_store(&config.store, &data_dir).await?;
     let artifacts = Arc::new(ArtifactStore::disk(data_dir.join("artifacts")).await?);
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -69,19 +69,22 @@ pub async fn build_runtime(config: &Config, fake_model: bool) -> Result<Arc<Agen
         ));
     }
     let broker = Arc::new(ApprovalBroker::new());
-    Ok(Arc::new(
-        AgentRuntime::new(
-            model,
-            default_tools,
-            PolicyEngine::new(broker),
-            store,
-            RuntimeConfig::from(&config.runtime),
-        )
-        .with_artifacts(artifacts)
-        .with_workspaces(catalog, workspace_tools)
-        .with_extensions(extensions)
-        .with_skills(workspace_skills, config.extensions.max_skill_context_bytes),
-    ))
+    let runtime = AgentRuntime::new(
+        model,
+        default_tools,
+        PolicyEngine::new(broker),
+        store,
+        RuntimeConfig::from(&config.runtime).with_store_timeouts(
+            std::time::Duration::from_secs(config.store.approval_ttl_seconds),
+            std::time::Duration::from_secs(config.store.lease_ttl_seconds),
+        ),
+    )
+    .with_artifacts(artifacts)
+    .with_workspaces(catalog, workspace_tools)
+    .with_extensions(extensions)
+    .with_skills(workspace_skills, config.extensions.max_skill_context_bytes);
+    runtime.recover().await?;
+    Ok(Arc::new(runtime))
 }
 
 fn build_workspace_tools(

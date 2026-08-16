@@ -20,6 +20,7 @@ pub struct Config {
     #[serde(rename = "extension")]
     pub extension: Vec<ExtensionConfigEntry>,
     pub skills: Vec<SkillConfigEntry>,
+    pub store: StoreConfig,
 }
 
 impl Config {
@@ -133,6 +134,18 @@ impl Config {
             return Err(OpsCodexError::Protocol(
                 "extensions.max_skill_context_bytes must be greater than zero".into(),
             ));
+        }
+        if self.store.approval_ttl_seconds == 0 || self.store.lease_ttl_seconds == 0 {
+            return Err(OpsCodexError::Protocol(
+                "store.approval_ttl_seconds and store.lease_ttl_seconds must be greater than zero"
+                    .into(),
+            ));
+        }
+        if !matches!(self.store.backend.as_str(), "sqlite" | "jsonl") {
+            return Err(OpsCodexError::Protocol(format!(
+                "store.backend must be sqlite or jsonl, not `{}`",
+                self.store.backend
+            )));
         }
         let mut seen = std::collections::BTreeSet::new();
         for workspace in &self.workspaces {
@@ -436,4 +449,26 @@ impl Default for SkillConfigEntry {
 
 const fn default_true() -> bool {
     true
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StoreConfig {
+    pub backend: String,
+    pub sqlite_path: Option<String>,
+    pub jsonl_dir: Option<String>,
+    pub approval_ttl_seconds: u64,
+    pub lease_ttl_seconds: u64,
+}
+
+impl Default for StoreConfig {
+    fn default() -> Self {
+        Self {
+            backend: "sqlite".into(),
+            sqlite_path: None,
+            jsonl_dir: None,
+            approval_ttl_seconds: 3600,
+            lease_ttl_seconds: 30,
+        }
+    }
 }

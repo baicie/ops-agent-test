@@ -35,8 +35,9 @@ function formattedTime(value?: string): string | null {
 
 function statusColor(status: string) {
   if (status === "running") return "bg-sky-500";
-  if (status === "failed") return "bg-red-500";
-  if (status === "cancelled") return "bg-zinc-400";
+  if (status === "failed" || status === "needs_reconciliation") return "bg-red-500";
+  if (status === "cancelled" || status === "interrupted") return "bg-zinc-400";
+  if (status === "waiting_approval") return "bg-amber-500";
   return "bg-emerald-500";
 }
 
@@ -127,7 +128,9 @@ export function Sidebar({
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-[13px] font-medium">{threadTitle(thread)}</span>
                   <span className="mt-0.5 block truncate text-[11px] text-zinc-500">
-                    {thread.workspaceId || selectedWorkspaceId}
+                    {thread.parentThreadId
+                      ? `Fork of ${thread.parentThreadId.slice(0, 8)}`
+                      : thread.workspaceId || selectedWorkspaceId}
                   </span>
                 </span>
                 {when && <span className="shrink-0 text-[10px] text-zinc-400">{when}</span>}

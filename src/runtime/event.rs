@@ -90,6 +90,21 @@ pub enum RuntimeEvent {
         error: String,
     },
     TurnCancelled,
+    ContextCompacted {
+        summary_id: String,
+        covers_seq_start: u64,
+        covers_seq_end: u64,
+        source_item_ids: Vec<String>,
+        source_evidence_ids: Vec<String>,
+        input_hash: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_provider: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_version: Option<String>,
+        summary: String,
+    },
 }
 
 impl RuntimeEvent {
@@ -124,6 +139,7 @@ impl RuntimeEvent {
             Self::TurnCompleted => "turn_completed",
             Self::TurnFailed { .. } => "turn_failed",
             Self::TurnCancelled => "turn_cancelled",
+            Self::ContextCompacted { .. } => "context_compacted",
         }
     }
 

@@ -147,6 +147,62 @@ fn trim_pair_safe_suffix(
     Vec::new()
 }
 
+pub fn local_summary(events: &[crate::runtime::EventEnvelope]) -> String {
+    use crate::runtime::RuntimeEvent;
+
+    let mut last_user = None;
+    let mut constraints = Vec::new();
+    let mut evidence_ids = Vec::new();
+    let mut failures = Vec::new();
+    let mut approvals = Vec::new();
+    for envelope in events {
+        match &envelope.event {
+            RuntimeEvent::UserMessage { content, .. } => {
+                last_user = Some(content.clone());
+                if !constraints.iter().any(|item| item == content) {
+                    constraints.push(content.clone());
+                }
+            }
+            RuntimeEvent::ToolCompleted {
+                tool,
+                success,
+                evidence,
+                ..
+            } => {
+                if let Some(id) = &evidence.evidence_id {
+                    evidence_ids.push(id.to_string());
+                }
+                if !*success {
+                    failures.push(tool.clone());
+                }
+            }
+            RuntimeEvent::ApprovalResolved { approved, .. } => {
+                approvals.push(if *approved { "approved" } else { "rejected" });
+            }
+            _ => {}
+        }
+    }
+    let mut lines =
+        vec!["Compacted investigation context. Original events are retained.".to_owned()];
+    if let Some(user) = last_user {
+        lines.push(format!("Unresolved user request: {user}"));
+    }
+    if !constraints.is_empty() {
+        let kept: Vec<_> = constraints.into_iter().take(8).collect();
+        lines.push(format!("User constraints: {}", kept.join(" | ")));
+    }
+    if !evidence_ids.is_empty() {
+        lines.push(format!("Key evidence IDs: {}", evidence_ids.join(", ")));
+    }
+    if !failures.is_empty() {
+        lines.push(format!("Tool failures: {}", failures.join(", ")));
+    }
+    if !approvals.is_empty() {
+        lines.push(format!("Approval results: {}", approvals.join(", ")));
+    }
+    lines.join("\n")
+}
+
 fn count_tool_calls(items: &[ModelItem]) -> usize {
     items
         .iter()

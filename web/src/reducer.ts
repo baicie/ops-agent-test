@@ -407,6 +407,25 @@ function applyRuntimeEvent(state: OpsState, event: NormalizedEvent): OpsState {
         "cancelled",
       );
 
+    case "context_compacted": {
+      const summary = stringValue(event.data.summary) ?? "Earlier context was compacted. Original events are retained.";
+      return {
+        ...base,
+        items: [
+          ...base.items,
+          {
+            id: `summary:${event.seq}`,
+            kind: "message",
+            role: "assistant",
+            content: summary,
+            streaming: false,
+            turnId: event.turnId,
+            timestamp: event.timestamp,
+          },
+        ],
+      };
+    }
+
     default: {
       const originalType = stringValue(event.data._event_type) ?? event.type;
       return {
@@ -424,13 +443,29 @@ function replayThread(state: OpsState, detail: ThreadDetail): OpsState {
     activeTurnId: null,
     items: [],
     loadStatus: "ready",
-    turnStatus: detail.status === "running" ? "running" : "idle",
+    turnStatus:
+      detail.status === "running"
+        ? "running"
+        : detail.status === "interrupted"
+          ? "interrupted"
+          : detail.status === "needs_reconciliation"
+            ? "needs_reconciliation"
+            : "idle",
     lastSeq: 0,
     error: null,
     selectedEvidenceId: null,
     clientUpgradeHint: null,
   };
-  return detail.events.reduce(applyRuntimeEvent, emptyThread);
+  const replayed = detail.events.reduce(applyRuntimeEvent, emptyThread);
+  if (detail.status === "interrupted" || detail.status === "needs_reconciliation") {
+    const lastTurnId = [...detail.events].reverse().find((event) => event.turnId)?.turnId ?? null;
+    return {
+      ...replayed,
+      turnStatus: detail.status,
+      activeTurnId: lastTurnId,
+    };
+  }
+  return replayed;
 }
 
 export function opsReducer(state: OpsState, action: OpsAction): OpsState {

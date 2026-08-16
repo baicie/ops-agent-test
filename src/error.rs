@@ -18,6 +18,8 @@ pub enum OpsCodexError {
     MaxStepsExceeded,
     #[error("thread already has an active turn")]
     TurnAlreadyRunning,
+    #[error("needs reconciliation: {0}")]
+    NeedsReconciliation(String),
     #[error("resource not found: {0}")]
     NotFound(String),
     #[error("operation timed out: {0}")]

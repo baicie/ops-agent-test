@@ -1,7 +1,5 @@
 use std::{path::PathBuf, str::FromStr, sync::Arc};
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use tokio::{
     fs::{self, OpenOptions},
     io::AsyncWriteExt,
@@ -13,26 +11,19 @@ use crate::{
     evidence::EvidenceMeta,
     model::ModelItem,
     runtime::{
-        ContextBudget, EventEnvelope, EvidenceId, Item, RuntimeEvent, Thread, ThreadId,
-        ThreadStatus, TurnId, WorkspaceId,
+        ContextBudget, EventEnvelope, EvidenceId, RuntimeEvent, Thread, ThreadId, TurnId,
+        WorkspaceId,
     },
-    store::{AppendEvent, EventStore},
+    store::{
+        AppendEvent, EventStore, ThreadSummary,
+        projection::{model_items_from_events, reconstruct_thread, summary_from_thread},
+    },
 };
 
 #[derive(Clone)]
 pub struct JsonlStore {
     directory: PathBuf,
     mutation_lock: Arc<Mutex<()>>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ThreadSummary {
-    pub id: ThreadId,
-    pub workspace_id: WorkspaceId,
-    pub status: ThreadStatus,
-    pub title: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
 }
 
 impl JsonlStore {
@@ -387,48 +378,6 @@ impl EventStore for JsonlStore {
     }
 }
 
-fn model_items_from_events(events: &[EventEnvelope]) -> Vec<ModelItem> {
-    events
-        .iter()
-        .filter_map(|envelope| match &envelope.event {
-            RuntimeEvent::UserMessage {
-                content,
-                incident_context,
-            } => {
-                let content = match incident_context {
-                    Some(context) => format!("{}\n\n{content}", context.prompt_block()),
-                    None => content.clone(),
-                };
-                Some(ModelItem::UserMessage { content })
-            }
-            RuntimeEvent::AssistantCompleted { content, .. } => Some(ModelItem::AssistantMessage {
-                content: content.clone(),
-            }),
-            RuntimeEvent::ToolStarted {
-                call_id,
-                tool,
-                arguments,
-            }
-            | RuntimeEvent::ToolProposed {
-                call_id,
-                tool,
-                arguments,
-            } => Some(ModelItem::ToolCall {
-                call_id: call_id.clone(),
-                name: tool.clone(),
-                arguments: arguments.clone(),
-            }),
-            RuntimeEvent::ToolCompleted {
-                call_id, output, ..
-            } => Some(ModelItem::ToolResult {
-                call_id: call_id.clone(),
-                output: output.clone(),
-            }),
-            _ => None,
-        })
-        .collect()
-}
-
 struct ParsedLog {
     events: Vec<EventEnvelope>,
     tail: LogTail,
@@ -521,112 +470,6 @@ fn validate_envelope(
         )));
     }
     Ok(())
-}
-
-fn reconstruct_thread(thread_id: &ThreadId, events: &[EventEnvelope]) -> Result<Thread> {
-    let first = events.first().ok_or_else(|| {
-        OpsCodexError::Storage(format!("thread {thread_id} has an empty event log"))
-    })?;
-    if !matches!(first.event, RuntimeEvent::ThreadCreated) {
-        return Err(OpsCodexError::Storage(format!(
-            "thread {thread_id} does not start with thread_created"
-        )));
-    }
-
-    let mut items = Vec::new();
-    let mut status = ThreadStatus::Idle;
-    for envelope in events {
-        match &envelope.event {
-            RuntimeEvent::ThreadCreated
-            | RuntimeEvent::AssistantDelta { .. }
-            | RuntimeEvent::ToolAuthorized { .. }
-            | RuntimeEvent::ToolExecutionStarted { .. } => {}
-            RuntimeEvent::UserMessage { content, .. } => items.push(Item::UserMessage {
-                content: content.clone(),
-            }),
-            RuntimeEvent::AssistantCompleted { content, .. } => {
-                items.push(Item::AssistantMessage {
-                    content: content.clone(),
-                })
-            }
-            RuntimeEvent::ToolStarted {
-                call_id,
-                tool,
-                arguments,
-            }
-            | RuntimeEvent::ToolProposed {
-                call_id,
-                tool,
-                arguments,
-            } => items.push(Item::ToolCall {
-                call_id: call_id.clone(),
-                name: tool.clone(),
-                arguments: arguments.clone(),
-            }),
-            RuntimeEvent::ToolCompleted {
-                call_id,
-                output,
-                evidence,
-                ..
-            } => items.push(Item::ToolResult {
-                call_id: call_id.clone(),
-                output: output.clone(),
-                evidence: evidence.clone(),
-            }),
-            RuntimeEvent::ApprovalRequired { approval_id, .. } => {
-                status = ThreadStatus::WaitingApproval;
-                items.push(Item::Approval {
-                    id: approval_id.clone(),
-                    approved: None,
-                });
-            }
-            RuntimeEvent::ApprovalResolved {
-                approval_id,
-                approved,
-            } => {
-                status = ThreadStatus::Running;
-                if let Some(Item::Approval {
-                    approved: decision, ..
-                }) = items
-                    .iter_mut()
-                    .rev()
-                    .find(|item| matches!(item, Item::Approval { id, .. } if id == approval_id))
-                {
-                    *decision = Some(*approved);
-                }
-            }
-            RuntimeEvent::TurnStarted => status = ThreadStatus::Running,
-            RuntimeEvent::TurnCompleted | RuntimeEvent::TurnCancelled => {
-                status = ThreadStatus::Idle
-            }
-            RuntimeEvent::TurnFailed { .. } => status = ThreadStatus::Failed,
-        }
-    }
-    Ok(Thread {
-        id: thread_id.clone(),
-        workspace_id: first.workspace_id.clone(),
-        items,
-        status,
-        created_at: first.timestamp,
-        updated_at: events
-            .last()
-            .map_or(first.timestamp, |envelope| envelope.timestamp),
-    })
-}
-
-fn summary_from_thread(thread: Thread) -> ThreadSummary {
-    let title = thread.items.iter().find_map(|item| match item {
-        Item::UserMessage { content } => Some(content.chars().take(120).collect()),
-        _ => None,
-    });
-    ThreadSummary {
-        id: thread.id,
-        workspace_id: thread.workspace_id,
-        status: thread.status,
-        title,
-        created_at: thread.created_at,
-        updated_at: thread.updated_at,
-    }
 }
 
 async fn read_existing(path: &std::path::Path, thread_id: &ThreadId) -> Result<Vec<u8>> {

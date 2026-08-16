@@ -69,6 +69,11 @@ impl ApprovalBroker {
         })
     }
 
+    pub fn restore(&self, request: PendingApproval) -> oneshot::Receiver<bool> {
+        let (_id, receiver) = self.insert(request);
+        receiver
+    }
+
     fn insert(&self, request: PendingApproval) -> (ApprovalId, oneshot::Receiver<bool>) {
         let id = request.id.clone();
         let (sender, receiver) = oneshot::channel();

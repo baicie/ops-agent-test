@@ -105,16 +105,18 @@ impl FromStr for WorkspaceId {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ThreadStatus {
     Idle,
     Running,
     WaitingApproval,
+    Interrupted,
+    NeedsReconciliation,
     Failed,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnStatus {
     Running,
@@ -122,6 +124,7 @@ pub enum TurnStatus {
     Completed,
     Failed,
     Cancelled,
+    Interrupted,
     NeedsReconciliation,
 }
 
@@ -149,6 +152,13 @@ pub enum Item {
         id: ApprovalId,
         approved: Option<bool>,
     },
+    Summary {
+        summary_id: String,
+        covers_seq_start: u64,
+        covers_seq_end: u64,
+        summary: String,
+        source_evidence_ids: Vec<String>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -159,6 +169,10 @@ pub struct Thread {
     pub status: ThreadStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_thread_id: Option<ThreadId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_at_seq: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

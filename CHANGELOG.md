@@ -16,6 +16,9 @@ All notable changes to OpsCodex are documented in this file. The format follows
 - `/api/v1` routes, Evidence/Artifact APIs, `/metrics`, and Evidence-linked UI.
 - Workspace scope, read-only Kubernetes tools, topology projection, and local Runbooks.
 - Capability descriptors, MCP/Custom Tool adapters, and local Skill context loading.
+- SQLite WAL default store, JSONL migrate/export, durable checkpoints/approvals/leases,
+  recovery classification, context compaction, thread fork, and a simulated
+  crash-after-checkpoint recovery suite.
 
 ### Documentation
 

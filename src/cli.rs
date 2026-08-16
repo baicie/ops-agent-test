@@ -59,10 +59,31 @@ pub enum Command {
         #[arg(long, default_value = "web/dist")]
         web_dir: PathBuf,
     },
+    Migrate {
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        verify: bool,
+    },
+    Export {
+        #[arg(long)]
+        thread: String,
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 pub async fn execute(cli: Cli) -> Result<()> {
     let mut config = Config::load(cli.config.as_deref())?;
+    match &cli.command {
+        Command::Migrate { dry_run, verify } => {
+            return migrate_store(&config, *dry_run, *verify).await;
+        }
+        Command::Export { thread, out } => {
+            return export_thread(&config, thread, out).await;
+        }
+        _ => {}
+    }
     if cli.enable_exec {
         config.tools.exec = true;
     }
@@ -93,7 +114,57 @@ pub async fn execute(cli: Cli) -> Result<()> {
             )
             .await
         }
+        Command::Migrate { .. } | Command::Export { .. } => unreachable!(),
     }
+}
+
+async fn migrate_store(config: &Config, dry_run: bool, verify: bool) -> Result<()> {
+    let data_dir = Config::data_dir();
+    let jsonl_dir = config
+        .store
+        .jsonl_dir
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("threads"));
+    let sqlite_path = config
+        .store
+        .sqlite_path
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("state.sqlite3"));
+    let report = crate::store::migrate_jsonl_to_sqlite(
+        jsonl_dir,
+        sqlite_path,
+        crate::store::MigrateOptions { dry_run, verify },
+    )
+    .await?;
+    println!(
+        "migrated threads={} events={} hash={}",
+        report.threads, report.events, report.hash
+    );
+    if let Some(backup) = report.backup_dir {
+        println!("jsonl backup {}", backup.display());
+    }
+    Ok(())
+}
+
+async fn export_thread(config: &Config, thread: &str, out: &PathBuf) -> Result<()> {
+    let data_dir = Config::data_dir();
+    let sqlite_path = config
+        .store
+        .sqlite_path
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("state.sqlite3"));
+    let store = crate::store::SqliteStore::open(sqlite_path).await?;
+    let report = crate::store::export_thread_jsonl(&store, thread, out).await?;
+    println!(
+        "exported thread {} ({} events) to {}",
+        report.thread_id,
+        report.events,
+        report.path.display()
+    );
+    Ok(())
 }
 
 async fn run(

@@ -12,6 +12,8 @@ fn runtime_defaults_match_the_mvp_safety_limits() {
     assert_eq!(config.loki.url, "http://localhost:3100");
     assert_eq!(config.tempo.url, "http://localhost:3200");
     assert!(!config.tools.exec);
+    assert_eq!(config.store.backend, "sqlite");
+    assert_eq!(config.store.approval_ttl_seconds, 3600);
 }
 
 #[test]

@@ -1,4 +1,12 @@
-export type ThreadStatus = "idle" | "running" | "completed" | "failed" | "cancelled";
+export type ThreadStatus =
+  | "idle"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "interrupted"
+  | "waiting_approval"
+  | "needs_reconciliation";
 
 export interface ThreadSummary {
   id: string;
@@ -7,6 +15,8 @@ export interface ThreadSummary {
   createdAt?: string;
   updatedAt?: string;
   workspaceId?: string | null;
+  parentThreadId?: string | null;
+  forkedAtSeq?: number | null;
 }
 
 export interface WorkspaceSummary {
@@ -79,6 +89,7 @@ export type RuntimeEventType =
   | "turn_completed"
   | "turn_failed"
   | "turn_cancelled"
+  | "context_compacted"
   | "unknown";
 
 export interface NormalizedEvent {
@@ -168,7 +179,13 @@ export type TimelineItem = MessageItem | ToolItem | ApprovalItem;
 
 export type LoadStatus = "idle" | "loading" | "ready" | "error";
 export type ConnectionStatus = "idle" | "connecting" | "connected" | "reconnecting";
-export type TurnStatus = "idle" | "running" | "failed" | "cancelled";
+export type TurnStatus =
+  | "idle"
+  | "running"
+  | "failed"
+  | "cancelled"
+  | "interrupted"
+  | "needs_reconciliation";
 
 export interface OpsState {
   threads: ThreadSummary[];

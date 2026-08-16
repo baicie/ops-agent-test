@@ -29,7 +29,7 @@ Issue、聊天记录或代码注释中。
 | `v0.2` Evidence Foundation | 实现中 | [v0.2](phases/v0.2-evidence-foundation.md) |
 | `v0.3` Runtime Workspace | 实现中 | [v0.3](phases/v0.3-runtime-workspace.md) |
 | `v0.4` Extensibility | 实现中 | [v0.4](phases/v0.4-extensibility.md) |
-| `v0.5` Continuity | 计划中 | [v0.5](phases/v0.5-continuity.md) |
+| `v0.5` Continuity | 实现中 | [v0.5](phases/v0.5-continuity.md) |
 | `v0.6` Safe Remediation | 计划中 | [v0.6](phases/v0.6-safe-remediation.md) |
 | `v1.0` Production Ready | 计划中 | [v1.0](phases/v1.0-production-readiness.md) |
 
@@ -56,12 +56,16 @@ Issue、聊天记录或代码注释中。
 ## 当前事实
 
 `v0.1.0` 已证明 Rust 自研 Runtime 可以在真实 Responses-compatible 模型和 Docker
-故障环境中完成 `Model -> Tool -> Evidence -> Model -> Diagnosis`。当前最重要的限制是：
-运行中的 Turn、审批和并发租约仍在进程内，重启后只能查看历史，不能安全续跑。这一限制由
-`v0.5` 解决，不能在此前把系统宣传为可恢复执行。`v0.2` Evidence Foundation 正在实现中：
+故障环境中完成 `Model -> Tool -> Evidence -> Model -> Diagnosis`。当前最重要的限制是：真实 Provider live gate、cluster/MCP smoke 和崩溃 fault suite
+尚未作为发布门禁跑过，因此 `v0.2` 到 `v0.5` 都不能标为已发布。重启后的安全续跑由
+`v0.5` 提供，在阶段门禁通过前不能把系统宣传为可恢复执行。`v0.2` Evidence Foundation 正在实现中：
 协议、Evidence/Claim、Loki/Tempo 和评测骨架已经落地，真实 Provider live gate 尚未作为
 发布门禁跑过，因此该阶段不能标为已发布。`v0.3` Runtime Workspace 正在实现中：Workspace
 隔离、只读 Kubernetes、Topology 投影和本地 Runbook 已经落地，真实 cluster smoke 与
 Provider gate 尚未跑过，因此也不能标为已发布。`v0.4` Extensibility 正在实现中：
 Capability Descriptor、受控 MCP/Custom Tool 和本地 Skill 已经落地，真实 MCP smoke 与
-Provider gate 尚未跑过，因此该阶段不能标为已发布。
+Provider gate 尚未跑过，因此该阶段不能标为已发布。`v0.5` Continuity 正在实现中：SQLite
+默认存储、JSONL 迁移/导出、checkpoint/lease/durable approval、recovery、compaction 和
+Thread Fork 已经落地。崩溃分类由 `just continuity-test` 在 durable checkpoint 提交后模拟
+进程退出；真实 OS kill-process suite 与 Provider gate 尚未作为发布门禁跑过，因此该阶段不能标为
+已发布。

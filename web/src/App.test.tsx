@@ -49,6 +49,15 @@ function createClient(detail?: ThreadDetail): OpsApiClient {
     getTopology: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     startTurn: vi.fn().mockResolvedValue({ turnId: "turn-new", status: "running" }),
     interruptTurn: vi.fn().mockResolvedValue(undefined),
+    resumeTurn: vi.fn().mockResolvedValue({ turnId: "turn-new", status: "resuming" }),
+    getRecovery: vi.fn().mockResolvedValue({
+      status: "interrupted",
+      userAction: "Resume from the last checkpoint.",
+      risk: "none",
+      resumePolicy: "replay_model",
+      skippedTools: [],
+    }),
+    forkThread: vi.fn().mockResolvedValue({ id: "thread-fork", parentThreadId: "thread-1", forkedAtSeq: 2 }),
     resolveApproval: vi.fn().mockResolvedValue(undefined),
     subscribe: vi.fn().mockReturnValue({ close: vi.fn() }),
   };

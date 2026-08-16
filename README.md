@@ -157,6 +157,7 @@ Important defaults:
 | `loki.url` | `http://localhost:3100` |
 | `tempo.url` | `http://localhost:3200` |
 | `tools.exec` | `false` |
+| `store.backend` | `sqlite` |
 | `server` | `127.0.0.1:3000` |
 
 `allowed_hosts` gates `http_get`; `allowed_containers` gates `docker_logs`. The `exec` tool is not registered unless `[tools].exec = true` or `--enable-exec` is passed, and every call still requires explicit approval.
@@ -175,9 +176,12 @@ POST   /api/v1/threads/:thread_id/turns
 GET    /api/v1/threads/:thread_id/events?after=:seq
 GET    /api/v1/threads/:thread_id/topology
 GET    /api/v1/threads/:thread_id/evidence/:evidence_id
+POST   /api/v1/threads/:thread_id/forks
 GET    /api/v1/artifacts/:sha256
 POST   /api/v1/approvals/:approval_id
 POST   /api/v1/turns/:turn_id/interrupt
+POST   /api/v1/turns/:turn_id/resume
+GET    /api/v1/turns/:turn_id/recovery
 ```
 
 `/api` remains an alias for `/api/v1` during the compatibility window. Turns may include
@@ -190,23 +194,49 @@ SSE responses use the JSONL sequence as the SSE `id`. A reconnect with `after=N`
 
 ## Storage
 
-Each Thread is a human-readable event log:
+The default store is SQLite WAL at `~/.opscodex/state.sqlite3`. Artifacts remain in the
+content-addressed directory. JSONL is retained for import, backup, and export:
 
 ```text
 ~/.opscodex/
   config.toml
-  threads/
-    <thread-id>.jsonl
+  state.sqlite3
+  threads/                 # legacy JSONL; import with `opscodex migrate`
+    backup-<timestamp>/
   artifacts/
     <workspace-id>/<sha256-prefix>/<sha256>
 ```
 
-The Store serializes appends per process, validates monotonic sequence numbers, ignores an incomplete crash tail during replay, and repairs that tail before the next append.
+`opscodex migrate --dry-run` / `--verify` imports JSONL threads into SQLite, compares
+event counts and content hashes, then moves the original files into a timestamped
+read-only backup. `opscodex export --thread ID --out FILE` writes one human-readable
+JSONL file and never exports secrets. Only one OpsCodex process may open a given
+SQLite file; a second process fails fast on the lock.
 
-Turn execution and approvals are intentionally process-local in v0.1. If the server
-is restarted while a Turn is running or waiting for approval, the JSONL history is
-kept for inspection but the in-flight operation is not resumed; start a new Turn
-after the process is back.
+Stop OpsCodex before copying or restoring store files. A backup is the SQLite
+database plus WAL sidecars and artifacts:
+
+```sh
+# Stop the process first. Copy all three SQLite files together.
+cp ~/.opscodex/state.sqlite3 ~/.opscodex/state.sqlite3-wal ~/.opscodex/state.sqlite3-shm /safe/backup/
+cp -R ~/.opscodex/artifacts /safe/backup/artifacts
+```
+
+To roll back a failed or unwanted JSONL migration, keep the `threads/backup-<timestamp>/`
+directory. Point `[store] backend = "jsonl"` at that backup (or copy the `.jsonl`
+files back to `threads/`) and start again; SQLite is not deleted automatically.
+To restore a SQLite backup, stop the process, replace `state.sqlite3` together
+with `-wal`/`-shm`, then start once. If the disk is full, appends fail closed;
+free space and retry. Do not delete the JSONL backup or a SQLite copy to make
+room until a verify pass (`opscodex migrate --verify` or a successful export)
+has confirmed the active store.
+
+Checkpoints, approvals, and leases are durable. After a restart, queued/model turns
+become `interrupted` and wait for explicit Resume. Observe tools may be retried;
+change or side-effecting tools whose result is unknown enter `needs_reconciliation`
+and are never retried automatically. Recovery classification is covered by
+`just continuity-test`; that suite simulates a kill after each durable checkpoint
+commit. It does not replace a live Provider gate.
 
 ## Development
 

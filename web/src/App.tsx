@@ -220,6 +220,37 @@ export default function App({ client = defaultApi }: AppProps) {
     }
   }, [client, state.activeTurnId, stopping]);
 
+  const resumeTurn = useCallback(async () => {
+    if (!state.activeTurnId || state.turnStatus === "running") return;
+    try {
+      const key = globalThis.crypto?.randomUUID?.() ?? `resume-${Date.now()}`;
+      const turn = await client.resumeTurn(state.activeTurnId, key);
+      dispatch({ type: "turn/started", payload: { turnId: turn.turnId } });
+    } catch (error) {
+      dispatch({ type: "error/set", payload: readableError(error) });
+    }
+  }, [client, state.activeTurnId, state.turnStatus]);
+
+  const forkThread = useCallback(async () => {
+    if (!state.activeThreadId || state.lastSeq < 1) return;
+    try {
+      const forked = await client.forkThread(state.activeThreadId, state.lastSeq);
+      dispatch({
+        type: "thread/created",
+        payload: {
+          id: forked.id,
+          status: "idle",
+          title: null,
+          workspaceId: selectedWorkspaceId,
+          parentThreadId: forked.parentThreadId,
+          forkedAtSeq: forked.forkedAtSeq,
+        },
+      });
+    } catch (error) {
+      dispatch({ type: "error/set", payload: readableError(error) });
+    }
+  }, [client, selectedWorkspaceId, state.activeThreadId, state.lastSeq]);
+
   const resolveApproval = useCallback(
     async (approvalId: string, approved: boolean) => {
       setResolvingApprovals((current) => new Set(current).add(approvalId));
@@ -306,6 +337,8 @@ export default function App({ client = defaultApi }: AppProps) {
             onSend={(input, incidentContext) => void sendMessage(input, incidentContext)}
             onStop={() => void stopTurn()}
             onApproval={(approvalId, approved) => void resolveApproval(approvalId, approved)}
+            onResume={() => void resumeTurn()}
+            onFork={() => void forkThread()}
             onDismissError={() => dispatch({ type: "error/clear" })}
             onSelectEvidence={(evidenceId) => dispatch({ type: "evidence/select", payload: evidenceId })}
           />

@@ -49,6 +49,22 @@ function RuntimeStatus({
       </Badge>
     );
   }
+  if (turnStatus === "interrupted") {
+    return (
+      <Badge className="gap-1.5 bg-amber-50 text-amber-800 ring-amber-200">
+        <RotateCw aria-hidden="true" className="h-3 w-3" />
+        Interrupted
+      </Badge>
+    );
+  }
+  if (turnStatus === "needs_reconciliation") {
+    return (
+      <Badge className="gap-1.5 bg-red-50 text-red-700 ring-red-200">
+        <AlertCircle aria-hidden="true" className="h-3 w-3" />
+        Needs reconciliation
+      </Badge>
+    );
+  }
   return (
     <Badge className="gap-1.5 bg-emerald-50 text-emerald-700 ring-emerald-200">
       <Radio aria-hidden="true" className="h-3 w-3" />

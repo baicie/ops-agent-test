@@ -24,6 +24,9 @@ web-build:
 demo-test:
     python3 -m unittest discover -s demo/order-service/tests -v
 
+continuity-test:
+    cargo test --locked --test continuity --test recovery_fault
+
 acceptance-test:
     python3 -m unittest discover -s scripts/tests -v
 
