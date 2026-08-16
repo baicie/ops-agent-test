@@ -16,6 +16,10 @@ pub struct Config {
     pub tools: ToolsConfig,
     pub server: ServerConfig,
     pub workspaces: Vec<WorkspaceConfigEntry>,
+    pub extensions: ExtensionsConfig,
+    #[serde(rename = "extension")]
+    pub extension: Vec<ExtensionConfigEntry>,
+    pub skills: Vec<SkillConfigEntry>,
 }
 
 impl Config {
@@ -125,6 +129,11 @@ impl Config {
                 "loki.max_lines must be greater than zero".into(),
             ));
         }
+        if self.extensions.max_skill_context_bytes == 0 {
+            return Err(OpsCodexError::Protocol(
+                "extensions.max_skill_context_bytes must be greater than zero".into(),
+            ));
+        }
         let mut seen = std::collections::BTreeSet::new();
         for workspace in &self.workspaces {
             crate::runtime::WorkspaceId::new(workspace.id.trim()).validate()?;
@@ -140,6 +149,29 @@ impl Config {
                 return Err(OpsCodexError::Protocol(
                     "workspace.max_concurrent_turns must be greater than zero".into(),
                 ));
+            }
+            if let Some(max_effect) = workspace.max_effect.as_deref() {
+                crate::extensions::CapabilityEffect::parse(max_effect)?;
+            }
+        }
+        let mut extension_ids = std::collections::BTreeSet::new();
+        for extension in &self.extension {
+            if extension.id.trim().is_empty() {
+                return Err(OpsCodexError::Protocol(
+                    "extension.id must not be empty".into(),
+                ));
+            }
+            if !extension_ids.insert(extension.id.trim().to_owned()) {
+                return Err(OpsCodexError::Protocol(format!(
+                    "duplicate extension id `{}`",
+                    extension.id
+                )));
+            }
+            if !matches!(extension.kind.as_str(), "custom" | "mcp" | "mcp_http") {
+                return Err(OpsCodexError::Protocol(format!(
+                    "unsupported extension kind `{}`",
+                    extension.kind
+                )));
             }
         }
         Ok(())
@@ -317,4 +349,91 @@ pub struct WorkspaceConfigEntry {
     pub allowed_kinds: Option<Vec<String>>,
     pub runbook_dir: Option<String>,
     pub max_concurrent_turns: Option<usize>,
+    pub max_effect: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExtensionsConfig {
+    pub production_safe: bool,
+    pub allow_custom_tools: bool,
+    pub max_skill_context_bytes: usize,
+}
+
+impl Default for ExtensionsConfig {
+    fn default() -> Self {
+        Self {
+            production_safe: false,
+            allow_custom_tools: false,
+            max_skill_context_bytes: 4 * 1024,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ExtensionConfigEntry {
+    pub id: String,
+    pub kind: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub trusted_local: bool,
+    pub path: Option<String>,
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    pub url: Option<String>,
+    pub allowlist_hosts: Vec<String>,
+    pub workspaces: Vec<String>,
+    pub effect: Option<String>,
+    pub recovery: Option<String>,
+    pub version: Option<String>,
+    pub max_restarts: Option<u32>,
+    pub env: Vec<String>,
+}
+
+impl Default for ExtensionConfigEntry {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            kind: String::new(),
+            enabled: true,
+            trusted_local: false,
+            path: None,
+            command: None,
+            args: Vec::new(),
+            cwd: None,
+            url: None,
+            allowlist_hosts: Vec::new(),
+            workspaces: Vec::new(),
+            effect: None,
+            recovery: None,
+            version: None,
+            max_restarts: None,
+            env: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SkillConfigEntry {
+    pub path: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub workspaces: Vec<String>,
+}
+
+impl Default for SkillConfigEntry {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            enabled: true,
+            workspaces: Vec::new(),
+        }
+    }
+}
+
+const fn default_true() -> bool {
+    true
 }

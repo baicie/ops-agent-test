@@ -1,6 +1,6 @@
 import { MessageSquareText, Plus, Radio } from "lucide-react";
 
-import type { ThreadSummary, WorkspaceSummary } from "../types";
+import type { ExtensionSummary, ThreadSummary, WorkspaceSummary } from "../types";
 import { cn } from "../lib/utils";
 import { Brand } from "./Brand";
 import { Button } from "./ui/button";
@@ -10,6 +10,7 @@ import { Separator } from "./ui/separator";
 interface SidebarProps {
   threads: ThreadSummary[];
   workspaces: WorkspaceSummary[];
+  extensions: ExtensionSummary[];
   selectedWorkspaceId: string;
   activeThreadId: string | null;
   loading: boolean;
@@ -42,6 +43,7 @@ function statusColor(status: string) {
 export function Sidebar({
   threads,
   workspaces,
+  extensions,
   selectedWorkspaceId,
   activeThreadId,
   loading,
@@ -134,6 +136,24 @@ export function Sidebar({
           })}
         </div>
       </ScrollArea>
+      <Separator />
+      {extensions.length > 0 && (
+        <div className="px-4 py-3">
+          <div className="pb-2 text-[11px] font-semibold uppercase text-zinc-500">Extensions</div>
+          <ul className="space-y-1.5">
+            {extensions.map((extension) => (
+              <li key={extension.id} className="text-[11px] text-zinc-600">
+                <span className="font-medium text-zinc-800">{extension.id}</span>
+                <span className="text-zinc-400"> · {extension.kind} {extension.version}</span>
+                <span className="mt-0.5 block truncate text-zinc-500">
+                  {extension.health.state}
+                  {extension.health.detail ? ` · ${extension.health.detail}` : ""}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       <Separator />
       <div className="flex h-12 shrink-0 items-center gap-2 px-5 text-[11px] text-zinc-500">
         <Radio aria-hidden="true" className="h-3.5 w-3.5 text-emerald-600" />

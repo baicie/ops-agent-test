@@ -112,6 +112,28 @@ async fn legacy_routes_still_create_threads() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+async fn extensions_and_skills_are_listed_without_secrets() -> anyhow::Result<()> {
+    let (state, _directory) = fake_state().await?;
+    let app = router(state);
+    let extensions = app
+        .clone()
+        .oneshot(request("GET", "/api/v1/extensions", None))
+        .await?;
+    assert_eq!(extensions.status(), StatusCode::OK);
+    let extensions: Value =
+        serde_json::from_slice(&extensions.into_body().collect().await?.to_bytes())?;
+    assert!(extensions["extensions"].as_array().unwrap().is_empty());
+
+    let skills = app
+        .oneshot(request("GET", "/api/v1/skills?workspace_id=default", None))
+        .await?;
+    assert_eq!(skills.status(), StatusCode::OK);
+    let skills: Value = serde_json::from_slice(&skills.into_body().collect().await?.to_bytes())?;
+    assert!(skills["skills"].as_array().unwrap().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
 async fn workspaces_are_listed_and_threads_cannot_cross_scope() -> anyhow::Result<()> {
     let config = opscodex::config::Config::from_toml(
         r#"

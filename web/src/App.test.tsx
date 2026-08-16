@@ -26,6 +26,8 @@ function createClient(detail?: ThreadDetail): OpsApiClient {
     listWorkspaces: vi.fn().mockResolvedValue([
       { id: "default", displayName: "Local demo", environment: "local", connectors: [] },
     ]),
+    listExtensions: vi.fn().mockResolvedValue([]),
+    listSkills: vi.fn().mockResolvedValue([]),
     listThreads: vi.fn().mockResolvedValue(
       detail
         ? [
@@ -316,5 +318,46 @@ describe("OpsCodex app", () => {
 
     await userEvent.click(screen.getAllByRole("button", { name: /new thread/i })[0]);
     expect(client.createThread).toHaveBeenCalledWith("staging");
+  });
+
+  it("shows loaded skills and external tool provenance", async () => {
+    const client = createClient({
+      id: "thread-1",
+      title: "MCP ping",
+      status: "completed",
+      workspaceId: "default",
+      events: [
+        event(1, "user_message", { content: "ping the extension" }),
+        event(2, "tool_completed", {
+          tool_call_id: "call-1",
+          tool: "mcp/mock/ping",
+          success: true,
+          output: {
+            content: { source: "mcp", version: "1.0.0", hash: "deadbeefcafebabe" },
+          },
+          evidence: { source: "mcp", evidence_id: "ev-mcp-1" },
+        }),
+      ],
+    });
+    client.listSkills = vi.fn().mockResolvedValue([
+      { id: "db-pool", title: "Pool", version: "1.0.0", hash: "abc", bytes: 120 },
+    ]);
+    client.listExtensions = vi.fn().mockResolvedValue([
+      {
+        id: "mock",
+        kind: "mcp_http",
+        version: "1.0.0",
+        hash: "abc",
+        enabled: true,
+        health: { state: "healthy" },
+        workspaces: ["default"],
+      },
+    ]);
+
+    render(<App client={client} />);
+
+    expect(await screen.findByTestId("loaded-skills")).toHaveTextContent("db-pool@1.0.0 (120 B)");
+    expect(await screen.findByText(/mcp v1.0.0/)).toBeInTheDocument();
+    expect(screen.getByText(/mcp_http 1\.0\.0/)).toBeInTheDocument();
   });
 });

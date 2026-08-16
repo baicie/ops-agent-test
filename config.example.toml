@@ -51,6 +51,26 @@ allowed_hosts = ["localhost", "127.0.0.1", "order-service"]
 [tools]
 exec = false
 
+# Extensions are discovered from local files only. Installation is not exposed
+# through the unauthenticated Web API. production_safe disables Custom Tool and
+# stdio MCP; HTTP MCP still requires an explicit host allowlist and TLS.
+[extensions]
+production_safe = false
+allow_custom_tools = false
+max_skill_context_bytes = 4096
+
+# [[extension]]
+# id = "acme-status"
+# kind = "custom"          # custom | mcp | mcp_http
+# trusted_local = true
+# path = "/absolute/path/tool.yaml"
+# effect = "observe"
+# recovery = "none_needed"
+
+# [[skills]]
+# path = "skills/db-pool"
+# workspaces = ["default"]
+
 [server]
 host = "127.0.0.1"
 port = 3000

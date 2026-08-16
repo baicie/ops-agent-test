@@ -65,6 +65,19 @@ function runbookCitation(item: ToolItem): { title?: string; version?: number; ha
   return { title, version, hash };
 }
 
+function toolProvenance(item: ToolItem): { source: string; version?: string; hash?: string } | null {
+  const payload = toolPayload(item.output);
+  const source =
+    asString(payload.source) ??
+    (item.name.startsWith("mcp/") ? "mcp" : item.name.startsWith("custom/") ? "custom" : undefined);
+  if (!source || (source !== "mcp" && source !== "custom")) return null;
+  return {
+    source,
+    version: asString(payload.version),
+    hash: asString(payload.hash),
+  };
+}
+
 function ToolIcon({ name }: { name: string }) {
   const className = "h-4 w-4";
   if (name.startsWith("k8s_")) return <Box aria-hidden="true" className={className} />;
@@ -116,6 +129,7 @@ export function ToolCall({
   const hasDetails = hasArguments || item.output !== undefined || item.evidence || item.error;
   const scope = k8sScope(item);
   const runbook = runbookCitation(item);
+  const provenance = toolProvenance(item);
 
   useEffect(() => {
     if (highlighted) setOpen(true);
@@ -149,6 +163,13 @@ export function ToolCall({
                   {runbook.title ? `${runbook.title} ` : ""}
                   {runbook.version !== undefined ? `v${runbook.version}` : ""}
                   {runbook.hash ? ` ${runbook.hash.slice(0, 12)}` : ""}
+                </span>
+              )}
+              {provenance && (
+                <span className="mt-0.5 block truncate text-[11px] text-zinc-500">
+                  {provenance.source}
+                  {provenance.version ? ` v${provenance.version}` : ""}
+                  {provenance.hash ? ` ${provenance.hash.slice(0, 12)}` : ""}
                 </span>
               )}
             </span>

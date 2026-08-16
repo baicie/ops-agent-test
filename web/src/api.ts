@@ -2,6 +2,8 @@ import type {
   IncidentContext,
   NormalizedEvent,
   RuntimeEventType,
+  SkillSummary,
+  ExtensionSummary,
   ThreadDetail,
   ThreadSummary,
   TopologyEdge,
@@ -49,6 +51,8 @@ interface SubscribeCallbacks {
 
 export interface OpsApiClient {
   listWorkspaces(): Promise<WorkspaceSummary[]>;
+  listExtensions(workspaceId?: string): Promise<ExtensionSummary[]>;
+  listSkills(workspaceId?: string): Promise<SkillSummary[]>;
   listThreads(workspaceId?: string): Promise<ThreadSummary[]>;
   createThread(workspaceId?: string): Promise<{ id: string; workspaceId: string }>;
   getThread(threadId: string): Promise<ThreadDetail>;
@@ -146,6 +150,35 @@ function normalizeWorkspace(value: unknown): WorkspaceSummary {
     displayName: asString(workspace.display_name) ?? asString(workspace.displayName) ?? asString(workspace.id) ?? "",
     environment: asString(workspace.environment) ?? "local",
     connectors: stringList(workspace.connectors),
+  };
+}
+
+function normalizeExtension(value: unknown): ExtensionSummary {
+  const extension = asRecord(value);
+  const health = asRecord(extension.health);
+  return {
+    id: asString(extension.id) ?? "",
+    kind: asString(extension.kind) ?? "custom",
+    version: asString(extension.version) ?? "",
+    hash: asString(extension.hash) ?? "",
+    enabled: extension.enabled === true,
+    health: {
+      state: asString(health.state) ?? "disabled",
+      detail: asString(health.detail),
+      restartCount: typeof health.restart_count === "number" ? health.restart_count : 0,
+    },
+    workspaces: stringList(extension.workspaces),
+  };
+}
+
+function normalizeSkill(value: unknown): SkillSummary {
+  const skill = asRecord(value);
+  return {
+    id: asString(skill.id) ?? "",
+    title: asString(skill.title) ?? asString(skill.id) ?? "",
+    version: asString(skill.version) ?? "",
+    hash: asString(skill.hash) ?? "",
+    bytes: typeof skill.bytes === "number" ? skill.bytes : 0,
   };
 }
 
@@ -249,6 +282,28 @@ export function createApiClient(
       return (Array.isArray(workspaces) ? workspaces : [])
         .map(normalizeWorkspace)
         .filter((workspace) => workspace.id);
+    },
+
+    async listExtensions(workspaceId) {
+      const params = new URLSearchParams();
+      if (workspaceId) params.set("workspace_id", workspaceId);
+      const query = params.size > 0 ? `?${params.toString()}` : "";
+      const body = await request<unknown>(apiUrl(`/api/v1/extensions${query}`));
+      const extensions = Array.isArray(body) ? body : asRecord(body).extensions;
+      return (Array.isArray(extensions) ? extensions : [])
+        .map(normalizeExtension)
+        .filter((extension) => extension.id);
+    },
+
+    async listSkills(workspaceId) {
+      const params = new URLSearchParams();
+      if (workspaceId) params.set("workspace_id", workspaceId);
+      const query = params.size > 0 ? `?${params.toString()}` : "";
+      const body = await request<unknown>(apiUrl(`/api/v1/skills${query}`));
+      const skills = Array.isArray(body) ? body : asRecord(body).skills;
+      return (Array.isArray(skills) ? skills : [])
+        .map(normalizeSkill)
+        .filter((skill) => skill.id);
     },
 
     async listThreads(workspaceId) {

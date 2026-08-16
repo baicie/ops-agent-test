@@ -58,6 +58,55 @@ describe("OpsCodex API client", () => {
     );
   });
 
+  it("loads non-sensitive extension and skill summaries", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          extensions: [
+            {
+              id: "mock",
+              kind: "mcp_http",
+              version: "1.0.0",
+              hash: "abc",
+              enabled: true,
+              health: { state: "healthy", restart_count: 0 },
+              workspaces: ["default"],
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          skills: [{ id: "db-pool", title: "Pool", version: "1.0.0", hash: "def", bytes: 128 }],
+        }),
+      );
+
+    const api = createApiClient("http://localhost:3000");
+    const extensions = await api.listExtensions("default");
+    const skills = await api.listSkills("default");
+
+    expect(extensions[0]).toEqual({
+      id: "mock",
+      kind: "mcp_http",
+      version: "1.0.0",
+      hash: "abc",
+      enabled: true,
+      health: { state: "healthy", detail: undefined, restartCount: 0 },
+      workspaces: ["default"],
+    });
+    expect(skills[0]).toEqual({
+      id: "db-pool",
+      title: "Pool",
+      version: "1.0.0",
+      hash: "def",
+      bytes: 128,
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:3000/api/v1/extensions?workspace_id=default",
+      expect.objectContaining({ headers: { accept: "application/json" } }),
+    );
+  });
+
   it("normalizes the nested runtime event emitted by the server", () => {
     const event = normalizeEventEnvelope(
       {

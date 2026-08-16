@@ -9,7 +9,7 @@ import { Sidebar } from "./components/Sidebar";
 import { Button } from "./components/ui/button";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { initialState, opsReducer } from "./reducer";
-import type { IncidentContext, TopologyGraph, WorkspaceSummary } from "./types";
+import type { ExtensionSummary, IncidentContext, SkillSummary, TopologyGraph, WorkspaceSummary } from "./types";
 
 interface AppProps {
   client?: OpsApiClient;
@@ -31,6 +31,8 @@ export default function App({ client = defaultApi }: AppProps) {
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState("default");
   const [topology, setTopology] = useState<TopologyGraph | null>(null);
+  const [extensions, setExtensions] = useState<ExtensionSummary[]>([]);
+  const [skills, setSkills] = useState<SkillSummary[]>([]);
 
   useEffect(() => {
     let active = true;
@@ -126,6 +128,30 @@ export default function App({ client = defaultApi }: AppProps) {
       active = false;
     };
   }, [client, state.activeThreadId, state.lastSeq, topologyWorkspaceId]);
+
+  useEffect(() => {
+    let active = true;
+    void (async () => {
+      try {
+        const [nextExtensions, nextSkills] = await Promise.all([
+          client.listExtensions(selectedWorkspaceId),
+          client.listSkills(selectedWorkspaceId),
+        ]);
+        if (!active) return;
+        setExtensions(nextExtensions);
+        setSkills(nextSkills);
+      } catch {
+        if (!active) {
+          return;
+        }
+        setExtensions([]);
+        setSkills([]);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [client, selectedWorkspaceId]);
 
   const createThread = useCallback(async () => {
     if (creatingThread) return;
@@ -223,6 +249,7 @@ export default function App({ client = defaultApi }: AppProps) {
     <Sidebar
       threads={state.threads}
       workspaces={workspaces}
+      extensions={extensions}
       selectedWorkspaceId={selectedWorkspaceId}
       activeThreadId={state.activeThreadId}
       loading={state.loadStatus === "loading" && state.threads.length === 0}
@@ -271,6 +298,7 @@ export default function App({ client = defaultApi }: AppProps) {
           <Chat
             state={state}
             topology={topology}
+            skills={skills}
             hasThread={Boolean(state.activeThreadId)}
             stopping={stopping}
             resolvingApprovals={resolvingApprovals}

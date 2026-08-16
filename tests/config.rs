@@ -83,3 +83,49 @@ fn workspace_ids_must_be_unique_and_valid() -> anyhow::Result<()> {
     assert!(invalid.to_string().contains("workspace id"));
     Ok(())
 }
+
+#[test]
+fn extensions_and_skills_are_parsed_and_default_to_disabled_custom_tools() -> anyhow::Result<()> {
+    assert!(!Config::default().extensions.allow_custom_tools);
+    assert!(!Config::default().extensions.production_safe);
+
+    let config = Config::from_toml(
+        r#"
+        [extensions]
+        production_safe = true
+        allow_custom_tools = true
+        max_skill_context_bytes = 2048
+
+        [[extension]]
+        id = "acme-status"
+        kind = "custom"
+        trusted_local = true
+        path = "/opt/acme/tool.yaml"
+        effect = "observe"
+
+        [[skills]]
+        path = "skills/db-pool"
+        workspaces = ["default"]
+        "#,
+    )?;
+    assert!(config.extensions.production_safe);
+    assert_eq!(config.extensions.max_skill_context_bytes, 2048);
+    assert_eq!(config.extension[0].id, "acme-status");
+    assert!(config.extension[0].enabled);
+    assert_eq!(config.skills[0].path, "skills/db-pool");
+    assert!(config.skills[0].enabled);
+
+    let duplicate = Config::from_toml(
+        r#"
+        [[extension]]
+        id = "dup"
+        kind = "mcp"
+        [[extension]]
+        id = "dup"
+        kind = "custom"
+        "#,
+    )
+    .unwrap_err();
+    assert!(duplicate.to_string().contains("duplicate extension"));
+    Ok(())
+}

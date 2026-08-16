@@ -159,7 +159,13 @@ async fn render_events(
                 println!("\n");
                 streaming = false;
             }
-            RuntimeEvent::ToolProposed { tool, .. } => println!("[tool] {tool} proposed"),
+            RuntimeEvent::ToolProposed { tool, .. } => {
+                if tool.contains('/') {
+                    println!("[tool] {tool} proposed (external)");
+                } else {
+                    println!("[tool] {tool} proposed");
+                }
+            }
             RuntimeEvent::ToolExecutionStarted { tool, .. } => println!("[tool] {tool} running"),
             RuntimeEvent::ToolStarted { tool, .. } => println!("[tool] {tool} running"),
             RuntimeEvent::ToolCompleted {

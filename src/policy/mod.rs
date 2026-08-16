@@ -4,7 +4,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::oneshot;
 
-use crate::{OpsCodexError, Result, runtime::ApprovalId, tools::ToolRisk};
+use crate::{
+    OpsCodexError, Result,
+    extensions::{CapabilityDescriptor, CapabilityEffect, CapabilitySource},
+    runtime::ApprovalId,
+    tools::ToolRisk,
+};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -19,6 +24,7 @@ pub struct PendingApproval {
     pub id: ApprovalId,
     pub tool: String,
     pub arguments: Value,
+    pub schema_hash: Option<String>,
 }
 
 struct PendingEntry {
@@ -41,13 +47,31 @@ impl ApprovalBroker {
         tool: impl Into<String>,
         arguments: Value,
     ) -> (ApprovalId, oneshot::Receiver<bool>) {
-        let id = ApprovalId::new();
-        let (sender, receiver) = oneshot::channel();
-        let request = PendingApproval {
-            id: id.clone(),
+        self.insert(PendingApproval {
+            id: ApprovalId::new(),
             tool: tool.into(),
             arguments,
-        };
+            schema_hash: None,
+        })
+    }
+
+    pub fn request_with_hash(
+        &self,
+        tool: impl Into<String>,
+        arguments: Value,
+        schema_hash: impl Into<String>,
+    ) -> (ApprovalId, oneshot::Receiver<bool>) {
+        self.insert(PendingApproval {
+            id: ApprovalId::new(),
+            tool: tool.into(),
+            arguments,
+            schema_hash: Some(schema_hash.into()),
+        })
+    }
+
+    fn insert(&self, request: PendingApproval) -> (ApprovalId, oneshot::Receiver<bool>) {
+        let id = request.id.clone();
+        let (sender, receiver) = oneshot::channel();
         self.pending
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -103,6 +127,27 @@ impl PolicyEngine {
 
     pub fn evaluate(&self, risk: ToolRisk) -> PolicyDecision {
         self.decision_for(risk)
+    }
+
+    pub fn evaluate_capability(&self, descriptor: &CapabilityDescriptor) -> PolicyDecision {
+        if !descriptor.enabled {
+            return PolicyDecision::Deny;
+        }
+        match descriptor.effect {
+            CapabilityEffect::Observe => PolicyDecision::Allow,
+            CapabilityEffect::ChangeReversible | CapabilityEffect::ChangeIrreversible => {
+                PolicyDecision::Deny
+            }
+            CapabilityEffect::ExternalSideEffect => {
+                if (descriptor.source == CapabilitySource::Builtin && descriptor.name == "exec")
+                    || descriptor.trusted_local
+                {
+                    PolicyDecision::Ask
+                } else {
+                    PolicyDecision::Deny
+                }
+            }
+        }
     }
 
     pub fn broker(&self) -> Arc<ApprovalBroker> {

@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     Result,
+    extensions::CapabilityDescriptor,
     runtime::{EvidenceMeta, ThreadId, WorkspaceId},
     store::EventStore,
 };
@@ -83,6 +84,10 @@ pub trait Tool: Send + Sync {
     fn schema(&self) -> Value;
 
     fn risk(&self) -> ToolRisk;
+
+    fn descriptor(&self) -> CapabilityDescriptor {
+        CapabilityDescriptor::builtin(self.name(), self.description(), self.schema(), self.risk())
+    }
 
     async fn execute(
         &self,

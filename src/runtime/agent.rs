@@ -15,6 +15,7 @@ use crate::{
         ArtifactStore, EvidenceIds, apply_citation_limitations, finalize_evidence,
         model_tool_output, parse_diagnosis, redact_json, validate_diagnosis,
     },
+    extensions::{ExtensionCatalog, SkillCatalog},
     model::{ModelEvent, ModelOutput, ModelProvider, ModelRequest, ModelResponse},
     policy::{PolicyDecision, PolicyEngine},
     runtime::{ContextBudget, EventId, TurnInput},
@@ -119,6 +120,9 @@ pub struct AgentRuntime {
     config: RuntimeConfig,
     turn_slots: Arc<Semaphore>,
     active_threads: Arc<Mutex<HashSet<ThreadId>>>,
+    extensions: Arc<ExtensionCatalog>,
+    workspace_skills: Arc<HashMap<String, SkillCatalog>>,
+    skill_budget_bytes: usize,
 }
 
 impl AgentRuntime {
@@ -141,6 +145,9 @@ impl AgentRuntime {
             turn_slots: Arc::new(Semaphore::new(config.max_concurrent_turns)),
             active_threads: Arc::new(Mutex::new(HashSet::new())),
             config,
+            extensions: Arc::new(ExtensionCatalog::default()),
+            workspace_skills: Arc::new(HashMap::new()),
+            skill_budget_bytes: 4 * 1024,
         }
     }
 
@@ -164,6 +171,21 @@ impl AgentRuntime {
         self
     }
 
+    pub fn with_extensions(mut self, catalog: ExtensionCatalog) -> Self {
+        self.extensions = Arc::new(catalog);
+        self
+    }
+
+    pub fn with_skills(
+        mut self,
+        skills: HashMap<String, SkillCatalog>,
+        skill_budget_bytes: usize,
+    ) -> Self {
+        self.workspace_skills = Arc::new(skills);
+        self.skill_budget_bytes = skill_budget_bytes.max(128);
+        self
+    }
+
     pub fn workspaces(&self) -> Arc<WorkspaceCatalog> {
         self.workspaces.clone()
     }
@@ -182,6 +204,38 @@ impl AgentRuntime {
 
     pub fn policy(&self) -> &PolicyEngine {
         &self.policy
+    }
+
+    pub fn extensions(&self) -> Arc<ExtensionCatalog> {
+        self.extensions.clone()
+    }
+
+    pub fn skills_for(&self, workspace: &WorkspaceId) -> Vec<crate::extensions::SkillSummary> {
+        self.workspace_skills
+            .get(workspace.as_str())
+            .map(SkillCatalog::summaries)
+            .unwrap_or_default()
+    }
+
+    pub fn skill_summaries(
+        &self,
+        workspace_id: Option<&str>,
+    ) -> Vec<crate::extensions::SkillSummary> {
+        if let Some(workspace_id) = workspace_id {
+            return self.skills_for(&WorkspaceId::new(workspace_id));
+        }
+        let mut summaries: Vec<_> = self
+            .workspace_skills
+            .values()
+            .flat_map(SkillCatalog::summaries)
+            .collect();
+        summaries.sort_by(|left, right| {
+            left.id
+                .cmp(&right.id)
+                .then(left.version.cmp(&right.version))
+        });
+        summaries.dedup_by(|left, right| left.id == right.id && left.version == right.version);
+        summaries
     }
 
     fn tools_for(&self, workspace: &WorkspaceId) -> Result<&ToolRegistry> {
@@ -273,13 +327,19 @@ impl AgentRuntime {
             self.workspaces.require(&workspace_id)?;
         }
         let tools = self.tools_for(&workspace_id)?.clone();
+        let instructions = compose_instructions(
+            SYSTEM_INSTRUCTIONS,
+            self.workspace_skills.get(workspace_id.as_str()),
+            &input,
+            self.skill_budget_bytes,
+        );
         self.emit(
             thread_id,
             Some(turn_id.clone()),
             None,
             RuntimeEvent::UserMessage {
-                content: input.content,
-                incident_context: input.incident_context,
+                content: input.content.clone(),
+                incident_context: input.incident_context.clone(),
             },
             events,
         )
@@ -296,7 +356,7 @@ impl AgentRuntime {
         let mut last_event_id: Option<EventId> = None;
         for _ in 0..self.config.max_steps {
             let request = ModelRequest {
-                instructions: SYSTEM_INSTRUCTIONS.into(),
+                instructions: instructions.clone(),
                 input: self
                     .store
                     .model_context(thread_id, &self.config.context)
@@ -494,15 +554,15 @@ impl AgentRuntime {
             .await?;
         let mut causation = Some(proposed.event_id.clone());
 
-        let risk = match context.tools.risk(&name) {
-            Ok(risk) => risk,
+        let descriptor = match context.tools.descriptor(&name) {
+            Ok(descriptor) => descriptor,
             Err(error) => {
                 return self
                     .emit_tool_error(context, causation, call_id, name, arguments, error)
                     .await;
             }
         };
-        match self.policy.evaluate(risk) {
+        match self.policy.evaluate_capability(&descriptor) {
             PolicyDecision::Deny => {
                 causation = Some(
                     self.emit(
@@ -531,10 +591,11 @@ impl AgentRuntime {
                     .await;
             }
             PolicyDecision::Ask => {
-                let (approval_id, decision) = self
-                    .policy
-                    .broker()
-                    .request(name.clone(), arguments.clone());
+                let (approval_id, decision) = self.policy.broker().request_with_hash(
+                    name.clone(),
+                    arguments.clone(),
+                    descriptor.provenance.schema_hash.clone(),
+                );
                 causation = Some(
                     self.emit(
                         context.thread_id,
@@ -593,6 +654,28 @@ impl AgentRuntime {
                             name,
                             arguments,
                             OpsCodexError::Policy("approval rejected".into()),
+                        )
+                        .await;
+                }
+                let current = match context.tools.descriptor(&name) {
+                    Ok(current) => current,
+                    Err(error) => {
+                        return self
+                            .emit_tool_error(context, causation, call_id, name, arguments, error)
+                            .await;
+                    }
+                };
+                if current.provenance.schema_hash != descriptor.provenance.schema_hash {
+                    return self
+                        .emit_tool_error(
+                            context,
+                            causation,
+                            call_id,
+                            name,
+                            arguments,
+                            OpsCodexError::Policy(
+                                "capability schema changed; approval invalidated".into(),
+                            ),
                         )
                         .await;
                 }
@@ -817,6 +900,26 @@ fn finalize_turn_diagnosis(
         .collect();
     let errors = validate_diagnosis(&diagnosis, &evidence);
     apply_citation_limitations(diagnosis, &errors)
+}
+
+fn compose_instructions(
+    system: &str,
+    skills: Option<&SkillCatalog>,
+    input: &TurnInput,
+    budget_bytes: usize,
+) -> String {
+    let Some(skills) = skills.filter(|catalog| !catalog.is_empty()) else {
+        return system.to_owned();
+    };
+    let rendered = skills.render(
+        input
+            .incident_context
+            .as_ref()
+            .and_then(|context| context.service.as_deref()),
+        &input.content,
+        budget_bytes,
+    );
+    format!("{system}\n\n{rendered}")
 }
 
 struct TurnEventContext<'a> {

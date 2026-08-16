@@ -25,8 +25,9 @@ phase's acceptance gate, and update an ADR before changing a recorded decision.
 
 - Hand-written Agent Runtime with Thread, Turn, Item, Context, Event and Tool abstractions
 - OpenAI Responses Provider with streaming text, function calls, usage and cancellation
-- `promql_query`, `docker_logs`, `http_get`, Loki `log_query`, Tempo `trace_search` / `trace_get`, read-only `k8s_get` / `k8s_events` / `k8s_logs`, `runbook_search` / `runbook_read`, `topology_query`, and opt-in `exec`
-- Safe/Ask/Forbidden policy decisions and interactive approval
+- `promql_query`, `docker_logs`, `http_get`, Loki `log_query`, Tempo `trace_search` / `trace_get`, read-only `k8s_get` / `k8s_events` / `k8s_logs`, `runbook_search` / `runbook_read`, `topology_query`, opt-in `exec`, plus constrained MCP/Custom Tool extensions
+- Local Skill packages loaded as untrusted context, never as tools or secrets
+- Safe/Ask/Forbidden policy decisions, capability effects, and interactive approval
 - Per-tool/model timeouts, 12-step default limit, 64 KiB output bounds and cancellation
 - One active Turn per Thread and four concurrent Turns globally by default
 - Append-only JSONL persistence with monotonic sequence numbers and reconnect replay
@@ -47,7 +48,9 @@ Agent Runtime ---- JSONL Thread Store
      |
      +---- ModelProvider ---- OpenAI-compatible Responses API
      |
-     +---- Tool Registry ---- Prometheus / Loki / Tempo / Kubernetes / Docker / HTTP / Runbooks / approved Exec
+     +---- Tool Registry ---- Prometheus / Loki / Tempo / Kubernetes / Docker / HTTP / Runbooks / MCP / Custom / approved Exec
+     |
+     +---- Skill Catalog ---- local SKILL.md context only
 ```
 
 The Runtime only depends on the project's `ModelProvider` contract. OpenAI request and SSE types stay inside `src/model/openai.rs`.

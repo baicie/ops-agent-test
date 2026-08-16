@@ -41,6 +41,7 @@ pub struct Workspace {
     pub kubernetes: Option<KubernetesScope>,
     pub runbook_dir: Option<PathBuf>,
     pub max_concurrent_turns: usize,
+    pub max_effect: Option<crate::extensions::CapabilityEffect>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -208,6 +209,11 @@ fn workspace_from_entry(config: &Config, entry: &WorkspaceConfigEntry) -> Result
             .max_concurrent_turns
             .unwrap_or(config.runtime.max_concurrent_turns)
             .max(1),
+        max_effect: entry
+            .max_effect
+            .as_deref()
+            .map(crate::extensions::CapabilityEffect::parse)
+            .transpose()?,
     })
 }
 

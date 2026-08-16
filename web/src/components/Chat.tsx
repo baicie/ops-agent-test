@@ -1,7 +1,7 @@
 import { AlertCircle, Info, Plus, SearchCode, X } from "lucide-react";
 import { useEffect, useRef } from "react";
 
-import type { IncidentContext, OpsState, TopologyGraph } from "../types";
+import type { IncidentContext, OpsState, SkillSummary, TopologyGraph } from "../types";
 import { Approval } from "./Approval";
 import { Composer } from "./Composer";
 import { Message } from "./Message";
@@ -13,6 +13,7 @@ import { ScrollArea } from "./ui/scroll-area";
 interface ChatProps {
   state: OpsState;
   topology: TopologyGraph | null;
+  skills: SkillSummary[];
   hasThread: boolean;
   stopping: boolean;
   resolvingApprovals: Set<string>;
@@ -33,6 +34,7 @@ function evidenceIdOf(item: OpsState["items"][number]): string | undefined {
 export function Chat({
   state,
   topology,
+  skills,
   hasThread,
   stopping,
   resolvingApprovals,
@@ -122,6 +124,14 @@ export function Chat({
           </div>
         ) : (
           <div className="mx-auto w-full max-w-3xl space-y-7 px-4 py-8 sm:px-8 sm:py-10">
+            {skills.length > 0 && (
+              <p className="text-[11px] text-zinc-500" data-testid="loaded-skills">
+                Skills in context:{" "}
+                {skills
+                  .map((skill) => `${skill.id}@${skill.version} (${skill.bytes} B)`)
+                  .join(" · ")}
+              </p>
+            )}
             {topology && (
               <Topology
                 graph={topology}

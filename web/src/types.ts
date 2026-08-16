@@ -16,6 +16,24 @@ export interface WorkspaceSummary {
   connectors: string[];
 }
 
+export interface ExtensionSummary {
+  id: string;
+  kind: string;
+  version: string;
+  hash: string;
+  enabled: boolean;
+  health: { state: string; detail?: string | null; restartCount?: number };
+  workspaces: string[];
+}
+
+export interface SkillSummary {
+  id: string;
+  title: string;
+  version: string;
+  hash: string;
+  bytes: number;
+}
+
 export interface TopologyNode {
   id: string;
   kind: string;

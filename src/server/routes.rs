@@ -25,6 +25,8 @@ use super::{ServerState, sse};
 pub(crate) fn api_router(state: ServerState) -> Router {
     let api = Router::new()
         .route("/workspaces", get(list_workspaces))
+        .route("/extensions", get(list_extensions))
+        .route("/skills", get(list_skills))
         .route("/threads", get(list_threads).post(create_thread))
         .route("/threads/{thread_id}", get(get_thread))
         .route("/threads/{thread_id}/turns", post(create_turn))
@@ -68,6 +70,38 @@ async fn metrics(State(state): State<ServerState>) -> impl IntoResponse {
 
 async fn list_workspaces(State(state): State<ServerState>) -> Json<serde_json::Value> {
     Json(json!({ "workspaces": state.runtime.workspaces().summaries() }))
+}
+
+#[derive(Default, Deserialize)]
+struct WorkspaceQuery {
+    workspace_id: Option<String>,
+}
+
+async fn list_extensions(
+    State(state): State<ServerState>,
+    Query(query): Query<WorkspaceQuery>,
+) -> Json<serde_json::Value> {
+    let extensions = if let Some(workspace_id) = query.workspace_id.as_deref() {
+        state
+            .runtime
+            .extensions()
+            .for_workspace(workspace_id)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        state.runtime.extensions().summaries().to_vec()
+    };
+    Json(json!({ "extensions": extensions }))
+}
+
+async fn list_skills(
+    State(state): State<ServerState>,
+    Query(query): Query<WorkspaceQuery>,
+) -> Json<serde_json::Value> {
+    Json(json!({
+        "skills": state.runtime.skill_summaries(query.workspace_id.as_deref())
+    }))
 }
 
 async fn list_threads(

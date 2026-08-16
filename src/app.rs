@@ -4,6 +4,7 @@ use crate::{
     OpsCodexError, Result,
     config::Config,
     evidence::ArtifactStore,
+    extensions::ExtensionCatalog,
     model::{DemoModelProvider, ModelProvider, OpenAIResponsesProvider},
     policy::{ApprovalBroker, PolicyEngine},
     runbook::RunbookCatalog,
@@ -27,13 +28,19 @@ pub async fn build_runtime(config: &Config, fake_model: bool) -> Result<Arc<Agen
         .map_err(|error| OpsCodexError::Tool(format!("failed to build HTTP client: {error}")))?;
     let catalog = WorkspaceCatalog::from_config(config)?;
     let mut workspace_tools = HashMap::new();
+    let mut workspace_skills = HashMap::new();
+    let mut extensions = ExtensionCatalog::default();
     let mut default_tools = ToolRegistry::new();
     for workspace in catalog.iter() {
-        let tools = build_workspace_tools(config, client.clone(), workspace)?;
+        let mut tools = build_workspace_tools(config, client.clone(), workspace)?;
+        let skills = extensions
+            .install_into(&mut tools, config, workspace, &client)
+            .await;
         if workspace.id.as_str() == "default" {
             default_tools = tools.clone();
         }
         workspace_tools.insert(workspace.id.as_str().to_owned(), tools);
+        workspace_skills.insert(workspace.id.as_str().to_owned(), skills);
     }
     if default_tools.is_empty()
         && let Some((_, tools)) = workspace_tools.iter().next()
@@ -71,7 +78,9 @@ pub async fn build_runtime(config: &Config, fake_model: bool) -> Result<Arc<Agen
             RuntimeConfig::from(&config.runtime),
         )
         .with_artifacts(artifacts)
-        .with_workspaces(catalog, workspace_tools),
+        .with_workspaces(catalog, workspace_tools)
+        .with_extensions(extensions)
+        .with_skills(workspace_skills, config.extensions.max_skill_context_bytes),
     ))
 }
 
