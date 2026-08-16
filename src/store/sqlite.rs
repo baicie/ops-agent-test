@@ -194,6 +194,79 @@ impl SqliteStore {
         &self.inner.path
     }
 
+    pub async fn integrity_check(&self) -> Result<()> {
+        self.with_conn(|conn| {
+            let result: String = conn
+                .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+                .map_err(|error| sqlite_error("integrity_check", error))?;
+            if result != "ok" {
+                return Err(OpsCodexError::Storage(format!(
+                    "sqlite integrity_check failed: {result}"
+                )));
+            }
+            let mut foreign_keys = conn
+                .prepare("PRAGMA foreign_key_check")
+                .map_err(|error| sqlite_error("foreign_key_check", error))?;
+            let mut rows = foreign_keys
+                .query([])
+                .map_err(|error| sqlite_error("foreign_key_check query", error))?;
+            if rows
+                .next()
+                .map_err(|error| sqlite_error("foreign_key_check row", error))?
+                .is_some()
+            {
+                return Err(OpsCodexError::Storage(
+                    "sqlite foreign key check failed".into(),
+                ));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn applied_schema_versions(&self) -> Result<Vec<i64>> {
+        self.with_conn(|conn| {
+            let mut statement = conn
+                .prepare("SELECT version FROM schema_migrations ORDER BY version")
+                .map_err(|error| sqlite_error("schema versions", error))?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, i64>(0))
+                .map_err(|error| sqlite_error("schema versions query", error))?;
+            let mut versions = Vec::new();
+            for row in rows {
+                versions.push(row.map_err(|error| sqlite_error("schema versions row", error))?);
+            }
+            Ok(versions)
+        })
+        .await
+    }
+
+    pub async fn backup_to(&self, dest: impl Into<PathBuf>) -> Result<PathBuf> {
+        let dest = dest.into();
+        if let Some(parent) = dest.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|error| {
+                OpsCodexError::Storage(format!(
+                    "failed to create backup directory {}: {error}",
+                    parent.display()
+                ))
+            })?;
+        }
+        if dest.exists() {
+            return Err(OpsCodexError::Storage(format!(
+                "backup path {} already exists",
+                dest.display()
+            )));
+        }
+        let dest_display = dest.display().to_string();
+        self.with_conn(move |conn| {
+            conn.execute("VACUUM INTO ?1", params![dest_display])
+                .map_err(|error| sqlite_error("vacuum into", error))?;
+            Ok(())
+        })
+        .await?;
+        Ok(dest)
+    }
+
     async fn with_conn<T, F>(&self, function: F) -> Result<T>
     where
         T: Send + 'static,

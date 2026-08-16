@@ -14,7 +14,7 @@ use crate::{
     config::RuntimeSettings,
     evidence::{
         ArtifactStore, EvidenceIds, apply_citation_limitations, finalize_evidence,
-        model_tool_output, parse_diagnosis, redact_json, validate_diagnosis,
+        model_tool_output, parse_diagnosis, redact_json,
     },
     extensions::{ExtensionCatalog, SkillCatalog},
     model::{ModelEvent, ModelOutput, ModelProvider, ModelRequest, ModelResponse},
@@ -1619,8 +1619,7 @@ fn finalize_turn_diagnosis(
             _ => None,
         })
         .collect();
-    let errors = validate_diagnosis(&diagnosis, &evidence);
-    apply_citation_limitations(diagnosis, &errors)
+    apply_citation_limitations(diagnosis, &evidence)
 }
 
 fn compose_instructions(

@@ -40,6 +40,9 @@ just release-check
 # 确定性本地 UI
 just serve-fake
 
+# 运维命令、合同与场景
+just ops-test
+
 # Demo 启停
 just demo-up
 just demo-down

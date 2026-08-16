@@ -179,12 +179,31 @@ pub fn validate_diagnosis(diagnosis: &Diagnosis, evidence: &[EvidenceMeta]) -> V
     errors
 }
 
-pub fn apply_citation_limitations(mut diagnosis: Diagnosis, errors: &[CitationError]) -> Diagnosis {
-    if !errors.is_empty() {
-        diagnosis.limitations.push(format!(
-            "Citation validation failed for {} claim(s); those statements are unverified.",
-            errors.len()
-        ));
+pub fn apply_citation_limitations(
+    mut diagnosis: Diagnosis,
+    evidence: &[EvidenceMeta],
+) -> Diagnosis {
+    let errors = validate_diagnosis(&diagnosis, evidence);
+    if errors.is_empty() {
+        return diagnosis;
     }
+    let known: Vec<_> = evidence
+        .iter()
+        .filter_map(|item| item.evidence_id.clone())
+        .collect();
+    diagnosis.claims.retain(|claim| match claim.kind {
+        ClaimKind::Recommended => true,
+        ClaimKind::Observed | ClaimKind::Inferred => {
+            !claim.evidence_ids.is_empty()
+                && claim
+                    .evidence_ids
+                    .iter()
+                    .all(|evidence_id| known.iter().any(|known_id| known_id == evidence_id))
+        }
+    });
+    diagnosis.limitations.push(format!(
+        "Evidence is insufficient; abstained from {} unsourced claim(s).",
+        errors.len()
+    ));
     diagnosis
 }

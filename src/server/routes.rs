@@ -54,6 +54,7 @@ pub(crate) fn api_router(state: ServerState) -> Router {
         .fallback(api_not_found);
     Router::new()
         .route("/healthz", get(health))
+        .route("/readyz", get(ready))
         .route("/metrics", get(metrics))
         .nest("/api", api.clone())
         .nest("/api/v1", api)
@@ -64,16 +65,33 @@ async fn api_not_found() -> Response {
     ApiError::not_found("API route not found").into_response()
 }
 
-async fn health(State(state): State<ServerState>) -> Json<serde_json::Value> {
-    Json(json!({
-        "status": "ok",
-        "store": "ok",
-        "provider": "configured",
-        "turns_started": state.runtime.metrics().turns_started.load(std::sync::atomic::Ordering::Relaxed),
-        "remediation_enabled": state.runtime.remediation.enabled,
-        "kill_switch": state.runtime.kill_switch(),
-        "mutations": state.runtime.mutation_count(),
-    }))
+async fn health() -> Json<serde_json::Value> {
+    Json(json!({ "status": "ok" }))
+}
+
+async fn ready(State(state): State<ServerState>) -> impl IntoResponse {
+    match state.runtime.store().list_threads().await {
+        Ok(threads) => {
+            let workspaces = state.runtime.workspaces().iter().count();
+            (
+                StatusCode::OK,
+                Json(json!({
+                    "status": "ready",
+                    "store": "ok",
+                    "threads": threads.len(),
+                    "workspaces": workspaces,
+                })),
+            )
+        }
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "not_ready",
+                "store": "error",
+                "error": {"code": "storage_error", "message": error.to_string()},
+            })),
+        ),
+    }
 }
 
 async fn metrics(State(state): State<ServerState>) -> impl IntoResponse {

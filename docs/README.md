@@ -16,6 +16,8 @@ Issue、聊天记录或代码注释中。
 4. [版本路线图](ROADMAP.md)：定义阶段依赖、状态、交付物和验收门禁。
 5. [阶段详细设计](phases/)：定义每一阶段具体做什么、怎么做、怎么验证。
 6. [ADR](adr/README.md)：记录具有长期约束力的技术决策、备选方案和后果。
+7. [运维手册](OPERATIONS.md)：安装、loopback、备份恢复、升级回滚与事故响应。
+8. [v1 合同](contracts/README.md)：冻结的 `/api/v1` 路径、error envelope 和 Event 类型。
 
 发生冲突时，优先级为：最终产品目标 > 已接受 ADR > 目标架构 > 路线图 > 阶段设计。
 如果产品范围改变，先更新最终目标；如果技术决策改变，先新增或替代 ADR，再同步下游文档。
@@ -31,7 +33,7 @@ Issue、聊天记录或代码注释中。
 | `v0.4` Extensibility | 实现中 | [v0.4](phases/v0.4-extensibility.md) |
 | `v0.5` Continuity | 实现中 | [v0.5](phases/v0.5-continuity.md) |
 | `v0.6` Safe Remediation | 实现中 | [v0.6](phases/v0.6-safe-remediation.md) |
-| `v1.0` Production Ready | 计划中 | [v1.0](phases/v1.0-production-readiness.md) |
+| `v1.0` Production Ready | 实现中 | [v1.0](phases/v1.0-production-readiness.md) |
 
 ## 状态定义
 
@@ -71,3 +73,6 @@ Thread Fork 已经落地。崩溃分类由 `just continuity-test` 在 durable ch
 已发布。`v0.6` Safe Remediation 正在实现中：结构化 ActionPlan、参数绑定批准、Demo fault reset、
 Kubernetes scale、kill switch 和 hash-chained Audit 已经落地。默认配置 mutation count 仍为 0；
 真实环境 gate 与受保护 cluster smoke 尚未作为发布门禁跑过，因此该阶段不能标为已发布。
+`v1.0` Production Readiness 正在实现中：doctor/verify/backup/audit CLI、`/readyz`、无 TLS 时
+非 loopback fail-closed、合同 fixture 和运维文档已经落地。24h soak、SBOM、真实 Provider gate
+与 `v1.0.0` tag 尚未作为发布门禁跑过，因此该阶段不能标为已发布。

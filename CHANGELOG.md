@@ -22,6 +22,9 @@ All notable changes to OpsCodex are documented in this file. The format follows
 - Structured Safe Remediation: ActionPlan state machine, parameter-bound approvals,
   isolated demo fault reset and Kubernetes scale runners, kill switch, and
   hash-chained Security Audit. Default configuration still performs zero mutations.
+- Production-readiness operations: `doctor` / `config validate` / `storage verify` /
+  `storage backup` / `audit verify`, `/readyz`, loopback-only binds without TLS,
+  and frozen `/api/v1` contract fixtures. `/healthz` is process liveness only.
 
 ### Documentation
 

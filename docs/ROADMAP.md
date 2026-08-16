@@ -14,7 +14,7 @@
 | [`v0.4`](phases/v0.4-extensibility.md) | 实现中 | 受约束 MCP、Custom Tool、Skill | 不可信扩展生命周期与策略测试 |
 | [`v0.5`](phases/v0.5-continuity.md) | 实现中 | SQLite、Compaction、Fork、Resume | 全崩溃边界恢复与迁移测试 |
 | [`v0.6`](phases/v0.6-safe-remediation.md) | 实现中 | 结构化安全修复和持久审计 | 零未批准动作、重放/越权防护 |
-| [`v1.0`](phases/v1.0-production-readiness.md) | 计划中 | 稳定本地生产版 | 全场景、安全、SLO、升级发布门禁 |
+| [`v1.0`](phases/v1.0-production-readiness.md) | 实现中 | 稳定本地生产版 | 全场景、安全、SLO、升级发布门禁 |
 
 ## 依赖关系
 

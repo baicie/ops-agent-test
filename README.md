@@ -34,6 +34,7 @@ phase's acceptance gate, and update an ADR before changing a recorded decision.
 - Axum REST API and SSE event stream
 - React/Vite UI for workspace selection, threads, Alert Context, streaming chat, tools, Topology, Evidence-linked Diagnosis, approvals, structured Action review and Stop
 - Structured Safe Remediation (off by default): ActionPlan, request-hash approval, demo fault reset, Kubernetes scale, kill switch, and hash-chained audit
+- Operations CLI (`doctor`, `config validate`, `storage verify` / `backup` / `export`, `audit verify`), `/readyz`, and loopback-only binds without TLS
 - Deterministic order-service incident with Prometheus metrics and Docker logs
 
 ## Architecture
@@ -169,6 +170,7 @@ Important defaults:
 
 ```text
 GET    /healthz
+GET    /readyz
 GET    /metrics
 GET    /api/v1/workspaces
 GET    /api/v1/threads
@@ -213,8 +215,15 @@ content-addressed directory. JSONL is retained for import, backup, and export:
 `opscodex migrate --dry-run` / `--verify` imports JSONL threads into SQLite, compares
 event counts and content hashes, then moves the original files into a timestamped
 read-only backup. `opscodex export --thread ID --out FILE` writes one human-readable
-JSONL file and never exports secrets. Only one OpsCodex process may open a given
-SQLite file; a second process fails fast on the lock.
+JSONL file and never exports secrets. `opscodex storage backup --out PATH` writes a
+consistent SQLite snapshot with `VACUUM INTO`. Only one OpsCodex process may open a
+given SQLite file; a second process fails fast on the lock.
+
+Without TLS the process binds loopback only. `opscodex doctor`, `config validate`,
+`storage verify`, and `audit verify` do not require a model API key. Day-to-day
+backup, restore, upgrade, `NeedsReconciliation`, and secret-leak response are in
+[docs/OPERATIONS.md](docs/OPERATIONS.md). The frozen `/api/v1` path list lives in
+[docs/contracts/](docs/contracts/README.md).
 
 Stop OpsCodex before copying or restoring store files. A backup is the SQLite
 database plus WAL sidecars and artifacts:
@@ -257,6 +266,7 @@ just check
 just web-dev
 just serve-fake
 just demo-test
+just ops-test
 ```
 
 Without `just`, run the underlying checks directly:

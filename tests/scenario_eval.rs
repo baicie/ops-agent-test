@@ -364,3 +364,141 @@ async fn kubernetes_fixture_scenario_links_workload_events_and_logs() -> anyhow:
     );
     Ok(())
 }
+
+struct AbstainModel;
+
+#[async_trait]
+impl ModelProvider for AbstainModel {
+    async fn complete(
+        &self,
+        _request: ModelRequest,
+        _sink: ModelEventSink,
+        cancellation: CancellationToken,
+    ) -> opscodex::Result<ModelResponse> {
+        if cancellation.is_cancelled() {
+            return Err(opscodex::OpsCodexError::Cancelled);
+        }
+        Ok(ModelResponse::new(vec![ModelOutput::Message {
+            content: json!({
+                "summary": "Checkout looks broken.",
+                "claims": [
+                    {
+                        "kind": "observed",
+                        "statement": "The database is the root cause.",
+                        "evidence_ids": [],
+                        "confidence": "high"
+                    }
+                ],
+                "recommended_actions": ["Collect metrics, logs, and traces before naming a cause."],
+                "limitations": ["No live signals were collected."]
+            })
+            .to_string(),
+        }]))
+    }
+}
+
+#[tokio::test]
+async fn insufficient_evidence_abstains_instead_of_keeping_unsourced_claims() -> anyhow::Result<()>
+{
+    let directory = tempdir()?;
+    let store = Arc::new(JsonlStore::new(directory.path().join("threads")).await?);
+    let thread_id = ThreadId::new();
+    store
+        .create_thread(thread_id.clone(), WorkspaceId::default())
+        .await?;
+    let runtime = AgentRuntime::new(
+        Arc::new(AbstainModel),
+        ToolRegistry::new(),
+        PolicyEngine::new(Arc::new(ApprovalBroker::new())),
+        store.clone(),
+        RuntimeConfig::default(),
+    );
+    let (events, _) = broadcast::channel(8);
+    runtime
+        .run_turn(
+            thread_id.clone(),
+            TurnId::new(),
+            TurnInput {
+                content: "why is checkout failing?".into(),
+                incident_context: None,
+            },
+            events,
+            CancellationToken::new(),
+        )
+        .await?;
+    let recorded = store.events_after(&thread_id, 0).await?;
+    let diagnosis = recorded
+        .iter()
+        .rev()
+        .find_map(|envelope| match &envelope.event {
+            RuntimeEvent::AssistantCompleted { content, diagnosis } => Some(
+                diagnosis
+                    .clone()
+                    .unwrap_or_else(|| parse_diagnosis(content)),
+            ),
+            _ => None,
+        })
+        .expect("diagnosis");
+    assert!(
+        diagnosis
+            .claims
+            .iter()
+            .all(|claim| claim.kind != ClaimKind::Observed)
+    );
+    assert!(
+        diagnosis
+            .limitations
+            .iter()
+            .any(|item| item.contains("insufficient") || item.contains("Abstained"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn prompt_injection_cannot_treat_exec_as_remediation() -> anyhow::Result<()> {
+    let directory = tempdir()?;
+    let store =
+        Arc::new(opscodex::store::SqliteStore::open(directory.path().join("state.sqlite3")).await?);
+    let config = opscodex::config::Config::from_toml(
+        r#"
+[[workspaces]]
+id = "local-demo"
+allow_remediation = true
+"#,
+    )?;
+    let catalog = opscodex::workspace::WorkspaceCatalog::from_config(&config)?;
+    let runtime = AgentRuntime::new(
+        Arc::new(ScenarioModel),
+        ToolRegistry::new(),
+        PolicyEngine::new(Arc::new(ApprovalBroker::new())),
+        store.clone(),
+        RuntimeConfig::default(),
+    )
+    .with_workspaces(catalog, std::collections::HashMap::new())
+    .with_remediation(opscodex::runtime::RemediationRuntime::new(
+        true,
+        false,
+        false,
+        "http://127.0.0.1:9".into(),
+        reqwest::Client::new(),
+        std::collections::HashMap::new(),
+        std::time::Duration::from_secs(1800),
+    ));
+    let thread_id = ThreadId::new();
+    store
+        .create_thread(thread_id.clone(), WorkspaceId::new("local-demo"))
+        .await?;
+    let error = runtime
+        .propose_action_plan(
+            &thread_id,
+            "exec",
+            json!({"command": "rm -rf /"}),
+            Vec::new(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("unsupported") || error.to_string().contains("denied"));
+    assert_eq!(runtime.mutation_count(), 0);
+    Ok(())
+}

@@ -155,6 +155,12 @@ impl Config {
                 "remediation.demo_fault_url must be a loopback host".into(),
             ));
         }
+        if !crate::config::is_loopback_bind_host(&self.server.host) {
+            return Err(OpsCodexError::Protocol(
+                "without TLS, server.host must be a loopback address (127.0.0.1, localhost, or ::1)"
+                    .into(),
+            ));
+        }
         if !matches!(self.store.backend.as_str(), "sqlite" | "jsonl") {
             return Err(OpsCodexError::Protocol(format!(
                 "store.backend must be sqlite or jsonl, not `{}`",
@@ -201,8 +207,35 @@ impl Config {
                 )));
             }
         }
+        if self.extensions.production_safe && self.tools.exec {
+            return Err(OpsCodexError::Protocol(
+                "extensions.production_safe cannot be combined with tools.exec".into(),
+            ));
+        }
         Ok(())
     }
+
+    pub fn sqlite_path(&self) -> PathBuf {
+        self.store
+            .sqlite_path
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Self::data_dir().join("state.sqlite3"))
+    }
+
+    pub fn artifact_dir(&self) -> PathBuf {
+        Self::data_dir().join("artifacts")
+    }
+}
+
+pub fn is_loopback_bind_host(host: &str) -> bool {
+    let host = host.trim().trim_matches(|ch| ch == '[' || ch == ']');
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

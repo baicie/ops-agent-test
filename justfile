@@ -30,6 +30,9 @@ continuity-test:
 remediation-test:
     cargo test --locked --test remediation
 
+ops-test:
+    cargo test --locked --test ops --test contracts --test config --test scenario_eval
+
 acceptance-test:
     python3 -m unittest discover -s scripts/tests -v
 

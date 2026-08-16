@@ -140,3 +140,23 @@ fn remediation_demo_url_must_be_loopback() {
         Config::from_toml("[remediation]\ndemo_fault_url = \"http://example.com\"").unwrap_err();
     assert!(error.to_string().contains("loopback"));
 }
+
+#[test]
+fn non_loopback_server_host_is_rejected_without_tls() {
+    let error = Config::from_toml("[server]\nhost = \"0.0.0.0\"").unwrap_err();
+    assert!(error.to_string().contains("loopback"));
+}
+
+#[test]
+fn production_safe_cannot_enable_exec() {
+    let error = Config::from_toml(
+        r#"
+        [tools]
+        exec = true
+        [extensions]
+        production_safe = true
+        "#,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("production_safe"));
+}
