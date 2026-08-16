@@ -48,6 +48,11 @@ check: fmt-check clippy test web-build
 release-check: web-install check audit
     cargo build --locked --release
 
+release-dry-run: web-build
+    cargo build --locked --release
+    python3 scripts/release_manifest.py --root . --out dist/release-dry-run \
+        --binary target/release/opscodex --web-dir web/dist
+
 build: web-build
     cargo build --locked --release
 

@@ -37,6 +37,9 @@ just check
 # 完整发布前门禁，包括依赖审计和 release build
 just release-check
 
+# 校验和与 SBOM（不打 tag）
+just release-dry-run
+
 # 确定性本地 UI
 just serve-fake
 

@@ -267,6 +267,7 @@ just web-dev
 just serve-fake
 just demo-test
 just ops-test
+just release-dry-run
 ```
 
 Without `just`, run the underlying checks directly:

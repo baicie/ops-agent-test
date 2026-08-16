@@ -214,3 +214,39 @@ JSONL thread logs remain compatible and should be preserved.
 Do not move a published tag. If a defect is found after publishing `v0.1.0`, fix
 it on `main` and release `v0.1.1`. Delete a remote tag only when publication has
 not completed and no user could have consumed it.
+
+SQLite-backed deployments also follow [docs/OPERATIONS.md](docs/OPERATIONS.md):
+stop the process, restore `state.sqlite3` (or a `VACUUM INTO` snapshot) together
+with artifacts, then run `opscodex storage verify` and `GET /readyz`.
+
+## 6. v1.0 candidate dry-run (does not publish)
+
+`v1.0.0` is not tagged from this procedure. The dry-run only proves a local
+candidate can be built, checksummed, and described by an SBOM.
+
+```sh
+just release-dry-run
+```
+
+This builds the Web bundle and release binary, then writes:
+
+```text
+dist/release-dry-run/manifest.json
+dist/release-dry-run/sbom.cdx.json
+dist/release-dry-run/SHA256SUMS
+```
+
+`manifest.json` sets `published: false` and `tag: null`. Verify the checksums
+without rebuilding:
+
+```sh
+python3 scripts/release_manifest.py --root . \
+  --verify dist/release-dry-run/SHA256SUMS
+```
+
+After copying the binary and `web/dist` onto a clean machine, confirm
+`opscodex doctor`, `opscodex storage verify`, `GET /healthz`, and `GET /readyz`.
+Do not run `git tag v1.0.0` until every v1.0 phase gate in
+[docs/phases/v1.0-production-readiness.md](docs/phases/v1.0-production-readiness.md)
+has evidence, including soak, live Provider gate, and human review.
+

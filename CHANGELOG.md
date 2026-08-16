@@ -25,6 +25,8 @@ All notable changes to OpsCodex are documented in this file. The format follows
 - Production-readiness operations: `doctor` / `config validate` / `storage verify` /
   `storage backup` / `audit verify`, `/readyz`, loopback-only binds without TLS,
   and frozen `/api/v1` contract fixtures. `/healthz` is process liveness only.
+- Release dry-run manifest: SHA-256 checksums, CycloneDX SBOM from Cargo.lock and
+  npm lockfile, and LICENSE check. It does not create a `v1.0.0` tag.
 
 ### Documentation
 

@@ -139,3 +139,12 @@ JSONL 回滚：保留 `threads/backup-<timestamp>/`，将 `[store] backend = "js
   `request_hash` 批准和 kill switch。
 - `exec`、MCP、Custom Tool 不能作为 remediation。
 - 无认证时禁止非 loopback 绑定。
+
+## 发布候选 dry-run
+
+`just release-dry-run` 构建 release 二进制和 Web 资源，并写出校验和与 CycloneDX SBOM。
+产物目录默认是 `dist/release-dry-run/`。该命令**不会**创建 `v1.0.0` tag 或 GitHub
+Release。`manifest.json` 中 `published` 必须为 `false`。
+
+安装候选版后执行 `opscodex doctor`、`storage verify`、`audit verify`，并确认
+`/healthz` 与 `/readyz`。回滚仍使用上一节的备份，而不是重放 tag。
