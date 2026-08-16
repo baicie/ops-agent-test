@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     OpsCodexError, Result,
@@ -6,12 +6,15 @@ use crate::{
     evidence::ArtifactStore,
     model::{DemoModelProvider, ModelProvider, OpenAIResponsesProvider},
     policy::{ApprovalBroker, PolicyEngine},
+    runbook::RunbookCatalog,
     runtime::{AgentRuntime, RuntimeConfig},
     store::JsonlStore,
     tools::{
-        DockerLogsTool, ExecTool, HttpGetTool, LokiLogQueryTool, PromqlTool, TempoTraceGetTool,
-        TempoTraceSearchTool, ToolRegistry,
+        DockerLogsTool, ExecTool, HttpGetTool, K8sEventsTool, K8sGetTool, K8sLogsTool,
+        KubernetesClient, LokiLogQueryTool, PromqlTool, RunbookReadTool, RunbookSearchTool,
+        TempoTraceGetTool, TempoTraceSearchTool, ToolRegistry, TopologyQueryTool,
     },
+    workspace::WorkspaceCatalog,
 };
 
 pub async fn build_runtime(config: &Config, fake_model: bool) -> Result<Arc<AgentRuntime>> {
@@ -22,47 +25,20 @@ pub async fn build_runtime(config: &Config, fake_model: bool) -> Result<Arc<Agen
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|error| OpsCodexError::Tool(format!("failed to build HTTP client: {error}")))?;
-    let mut tools = ToolRegistry::new();
-    tools.register(Arc::new(
-        PromqlTool::new(client.clone(), &config.prometheus.url)?
-            .with_max_output_bytes(config.runtime.max_output_bytes),
-    ))?;
-    tools.register(Arc::new(
-        DockerLogsTool::new(config.targets.allowed_containers.clone())
-            .with_max_output_bytes(config.runtime.max_output_bytes),
-    ))?;
-    tools.register(Arc::new(
-        HttpGetTool::new(client.clone(), config.targets.allowed_hosts.clone())
-            .with_max_output_bytes(config.runtime.max_output_bytes),
-    ))?;
-    let loki_tenant = std::env::var(&config.loki.tenant_env).ok();
-    tools.register(Arc::new(
-        LokiLogQueryTool::new(
-            client.clone(),
-            &config.loki.url,
-            &config.loki.tenant_header,
-            loki_tenant,
-            config.loki.max_range_seconds,
-            config.loki.max_lines,
-        )?
-        .with_max_output_bytes(config.runtime.max_output_bytes),
-    ))?;
-    tools.register(Arc::new(
-        TempoTraceSearchTool::new(
-            client.clone(),
-            &config.tempo.url,
-            config.tempo.max_range_seconds,
-        )?
-        .with_max_output_bytes(config.runtime.max_output_bytes),
-    ))?;
-    tools.register(Arc::new(
-        TempoTraceGetTool::new(client, &config.tempo.url)?
-            .with_max_output_bytes(config.runtime.max_output_bytes),
-    ))?;
-    if config.tools.exec {
-        tools.register(Arc::new(
-            ExecTool::new().with_max_output_bytes(config.runtime.max_output_bytes),
-        ))?;
+    let catalog = WorkspaceCatalog::from_config(config)?;
+    let mut workspace_tools = HashMap::new();
+    let mut default_tools = ToolRegistry::new();
+    for workspace in catalog.iter() {
+        let tools = build_workspace_tools(config, client.clone(), workspace)?;
+        if workspace.id.as_str() == "default" {
+            default_tools = tools.clone();
+        }
+        workspace_tools.insert(workspace.id.as_str().to_owned(), tools);
+    }
+    if default_tools.is_empty()
+        && let Some((_, tools)) = workspace_tools.iter().next()
+    {
+        default_tools = tools.clone();
     }
 
     let model: Arc<dyn ModelProvider> = if fake_model || config.model.provider == "fake" {
@@ -89,11 +65,80 @@ pub async fn build_runtime(config: &Config, fake_model: bool) -> Result<Arc<Agen
     Ok(Arc::new(
         AgentRuntime::new(
             model,
-            tools,
+            default_tools,
             PolicyEngine::new(broker),
             store,
             RuntimeConfig::from(&config.runtime),
         )
-        .with_artifacts(artifacts),
+        .with_artifacts(artifacts)
+        .with_workspaces(catalog, workspace_tools),
     ))
+}
+
+fn build_workspace_tools(
+    config: &Config,
+    client: reqwest::Client,
+    workspace: &crate::workspace::Workspace,
+) -> Result<ToolRegistry> {
+    let mut tools = ToolRegistry::new();
+    tools.register(Arc::new(
+        PromqlTool::new(client.clone(), &workspace.prometheus_url)?
+            .with_max_output_bytes(config.runtime.max_output_bytes),
+    ))?;
+    tools.register(Arc::new(
+        DockerLogsTool::new(workspace.allowed_containers.clone())
+            .with_max_output_bytes(config.runtime.max_output_bytes),
+    ))?;
+    tools.register(Arc::new(
+        HttpGetTool::new(client.clone(), workspace.allowed_hosts.clone())
+            .with_max_output_bytes(config.runtime.max_output_bytes),
+    ))?;
+    let loki_tenant = std::env::var(&workspace.loki_tenant_env).ok();
+    tools.register(Arc::new(
+        LokiLogQueryTool::new(
+            client.clone(),
+            &workspace.loki_url,
+            &workspace.loki_tenant_header,
+            loki_tenant,
+            config.loki.max_range_seconds,
+            config.loki.max_lines,
+        )?
+        .with_max_output_bytes(config.runtime.max_output_bytes),
+    ))?;
+    tools.register(Arc::new(
+        TempoTraceSearchTool::new(
+            client.clone(),
+            &workspace.tempo_url,
+            config.tempo.max_range_seconds,
+        )?
+        .with_max_output_bytes(config.runtime.max_output_bytes),
+    ))?;
+    tools.register(Arc::new(
+        TempoTraceGetTool::new(client.clone(), &workspace.tempo_url)?
+            .with_max_output_bytes(config.runtime.max_output_bytes),
+    ))?;
+    if let Some(scope) = &workspace.kubernetes
+        && let Ok(kube) = KubernetesClient::from_scope(client, scope)
+    {
+        let kube = Arc::new(kube);
+        tools.register(Arc::new(
+            K8sGetTool::new(kube.clone()).with_max_output_bytes(config.runtime.max_output_bytes),
+        ))?;
+        tools.register(Arc::new(
+            K8sEventsTool::new(kube.clone()).with_max_output_bytes(config.runtime.max_output_bytes),
+        ))?;
+        tools.register(Arc::new(
+            K8sLogsTool::new(kube).with_max_output_bytes(config.runtime.max_output_bytes),
+        ))?;
+    }
+    let runbooks = Arc::new(RunbookCatalog::load(workspace.runbook_dir.as_ref())?);
+    tools.register(Arc::new(RunbookSearchTool::new(runbooks.clone())))?;
+    tools.register(Arc::new(RunbookReadTool::new(runbooks)))?;
+    tools.register(Arc::new(TopologyQueryTool))?;
+    if config.tools.exec {
+        tools.register(Arc::new(
+            ExecTool::new().with_max_output_bytes(config.runtime.max_output_bytes),
+        ))?;
+    }
+    Ok(tools)
 }

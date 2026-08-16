@@ -14,7 +14,7 @@ use crate::{
     model::ModelItem,
     runtime::{
         ContextBudget, EventEnvelope, EvidenceId, Item, RuntimeEvent, Thread, ThreadId,
-        ThreadStatus, TurnId,
+        ThreadStatus, TurnId, WorkspaceId,
     },
     store::{AppendEvent, EventStore},
 };
@@ -28,6 +28,7 @@ pub struct JsonlStore {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ThreadSummary {
     pub id: ThreadId,
+    pub workspace_id: WorkspaceId,
     pub status: ThreadStatus,
     pub title: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -53,10 +54,16 @@ impl JsonlStore {
         &self.directory
     }
 
-    pub async fn create_thread(&self, thread_id: ThreadId) -> Result<EventEnvelope> {
+    pub async fn create_thread(
+        &self,
+        thread_id: ThreadId,
+        workspace_id: WorkspaceId,
+    ) -> Result<EventEnvelope> {
+        workspace_id.validate()?;
         let _guard = self.mutation_lock.lock().await;
         let path = self.thread_path(&thread_id);
-        let envelope = EventEnvelope::new(1, thread_id, None, RuntimeEvent::ThreadCreated);
+        let envelope = EventEnvelope::new(1, thread_id, None, RuntimeEvent::ThreadCreated)
+            .with_workspace(workspace_id);
         let line = encode_line(&envelope)?;
         let mut file = OpenOptions::new()
             .create_new(true)
@@ -116,6 +123,9 @@ impl JsonlStore {
         );
         if let Some(stream_kind) = command.stream_kind {
             envelope.stream_kind = stream_kind;
+        }
+        if let Some(first) = parsed.events.first() {
+            envelope.workspace_id = first.workspace_id.clone();
         }
         let mut line = Vec::new();
         match parsed.tail {
@@ -218,9 +228,30 @@ impl JsonlStore {
         Err(OpsCodexError::NotFound(format!("evidence {evidence_id}")))
     }
 
+    pub async fn get_evidence_in(
+        &self,
+        workspace_id: &WorkspaceId,
+        thread_id: &ThreadId,
+        evidence_id: &EvidenceId,
+    ) -> Result<EvidenceMeta> {
+        let thread = self.get_thread_in(workspace_id, thread_id).await?;
+        let _ = thread;
+        self.get_evidence(thread_id, evidence_id).await
+    }
+
     pub async fn get_thread(&self, thread_id: &ThreadId) -> Result<Thread> {
         let events = self.events_after(thread_id, 0).await?;
         reconstruct_thread(thread_id, &events)
+    }
+
+    pub async fn get_thread_in(
+        &self,
+        workspace_id: &WorkspaceId,
+        thread_id: &ThreadId,
+    ) -> Result<Thread> {
+        let thread = self.get_thread(thread_id).await?;
+        crate::workspace::deny_cross_workspace(workspace_id, &thread.workspace_id, "thread")?;
+        Ok(thread)
     }
 
     pub async fn thread(&self, thread_id: &ThreadId) -> Result<Thread> {
@@ -277,8 +308,12 @@ impl JsonlStore {
 
 #[async_trait::async_trait]
 impl EventStore for JsonlStore {
-    async fn create_thread(&self, thread_id: ThreadId) -> Result<EventEnvelope> {
-        JsonlStore::create_thread(self, thread_id).await
+    async fn create_thread(
+        &self,
+        thread_id: ThreadId,
+        workspace_id: WorkspaceId,
+    ) -> Result<EventEnvelope> {
+        JsonlStore::create_thread(self, thread_id, workspace_id).await
     }
 
     async fn append(
@@ -304,6 +339,14 @@ impl EventStore for JsonlStore {
 
     async fn get_thread(&self, thread_id: &ThreadId) -> Result<Thread> {
         JsonlStore::get_thread(self, thread_id).await
+    }
+
+    async fn get_thread_in(
+        &self,
+        workspace_id: &WorkspaceId,
+        thread_id: &ThreadId,
+    ) -> Result<Thread> {
+        JsonlStore::get_thread_in(self, workspace_id, thread_id).await
     }
 
     async fn list_threads(&self) -> Result<Vec<ThreadSummary>> {
@@ -332,6 +375,15 @@ impl EventStore for JsonlStore {
         evidence_id: &EvidenceId,
     ) -> Result<EvidenceMeta> {
         JsonlStore::get_evidence(self, thread_id, evidence_id).await
+    }
+
+    async fn get_evidence_in(
+        &self,
+        workspace_id: &WorkspaceId,
+        thread_id: &ThreadId,
+        evidence_id: &EvidenceId,
+    ) -> Result<EvidenceMeta> {
+        JsonlStore::get_evidence_in(self, workspace_id, thread_id, evidence_id).await
     }
 }
 
@@ -459,6 +511,15 @@ fn validate_envelope(
             envelope.seq
         )));
     }
+    if let Some(first) = previous.first()
+        && first.workspace_id != envelope.workspace_id
+    {
+        return Err(OpsCodexError::Storage(format!(
+            "workspace mismatch in {} at sequence {}",
+            path.display(),
+            envelope.seq
+        )));
+    }
     Ok(())
 }
 
@@ -543,6 +604,7 @@ fn reconstruct_thread(thread_id: &ThreadId, events: &[EventEnvelope]) -> Result<
     }
     Ok(Thread {
         id: thread_id.clone(),
+        workspace_id: first.workspace_id.clone(),
         items,
         status,
         created_at: first.timestamp,
@@ -559,6 +621,7 @@ fn summary_from_thread(thread: Thread) -> ThreadSummary {
     });
     ThreadSummary {
         id: thread.id,
+        workspace_id: thread.workspace_id,
         status: thread.status,
         title,
         created_at: thread.created_at,

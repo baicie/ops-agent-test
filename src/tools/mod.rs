@@ -3,10 +3,15 @@ mod docker_logs;
 mod exec;
 mod fake;
 mod http;
+mod kubernetes;
 mod loki;
 mod promql;
 mod registry;
+mod runbook;
 mod tempo;
+mod topology;
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -14,18 +19,46 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::{Result, runtime::EvidenceMeta};
+use crate::{
+    Result,
+    runtime::{EvidenceMeta, ThreadId, WorkspaceId},
+    store::EventStore,
+};
 
 pub use docker_logs::DockerLogsTool;
 pub use exec::ExecTool;
 pub use fake::FakeTool;
 pub use http::HttpGetTool;
+pub use kubernetes::{
+    K8sEventsTool, K8sGetTool, K8sLogsTool, KubernetesClient, KubernetesPolicy, READ_VERBS,
+};
 pub use loki::LokiLogQueryTool;
 pub use promql::PromqlTool;
 pub use registry::ToolRegistry;
+pub use runbook::{RunbookReadTool, RunbookSearchTool};
 pub use tempo::{TempoTraceGetTool, TempoTraceSearchTool};
+pub use topology::TopologyQueryTool;
 
 pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+
+#[derive(Clone)]
+pub struct ToolInvocation {
+    pub cancellation: CancellationToken,
+    pub workspace_id: WorkspaceId,
+    pub thread_id: ThreadId,
+    pub store: Option<Arc<dyn EventStore>>,
+}
+
+impl ToolInvocation {
+    pub fn new(cancellation: CancellationToken) -> Self {
+        Self {
+            cancellation,
+            workspace_id: WorkspaceId::default(),
+            thread_id: ThreadId::new(),
+            store: None,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -56,6 +89,14 @@ pub trait Tool: Send + Sync {
         arguments: Value,
         cancellation: CancellationToken,
     ) -> Result<ToolOutput>;
+
+    async fn execute_with_context(
+        &self,
+        arguments: Value,
+        invocation: ToolInvocation,
+    ) -> Result<ToolOutput> {
+        self.execute(arguments, invocation.cancellation).await
+    }
 }
 
 pub(crate) fn truncate_output(bytes: &[u8], max_bytes: usize) -> (String, bool) {

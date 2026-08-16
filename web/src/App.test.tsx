@@ -23,6 +23,9 @@ function event(
 
 function createClient(detail?: ThreadDetail): OpsApiClient {
   return {
+    listWorkspaces: vi.fn().mockResolvedValue([
+      { id: "default", displayName: "Local demo", environment: "local", connectors: [] },
+    ]),
     listThreads: vi.fn().mockResolvedValue(
       detail
         ? [
@@ -32,14 +35,16 @@ function createClient(detail?: ThreadDetail): OpsApiClient {
               status: detail.status,
               createdAt: detail.createdAt,
               updatedAt: detail.updatedAt,
+              workspaceId: detail.workspaceId ?? "default",
             },
           ]
         : [],
     ),
-    createThread: vi.fn().mockResolvedValue({ id: "thread-new" }),
+    createThread: vi.fn().mockResolvedValue({ id: "thread-new", workspaceId: "default" }),
     getThread: vi.fn().mockImplementation(async (id: string) =>
-      detail ?? { id, title: null, status: "idle", events: [] },
+      detail ?? { id, title: null, status: "idle", workspaceId: "default", events: [] },
     ),
+    getTopology: vi.fn().mockResolvedValue({ nodes: [], edges: [] }),
     startTurn: vi.fn().mockResolvedValue({ turnId: "turn-new", status: "running" }),
     interruptTurn: vi.fn().mockResolvedValue(undefined),
     resolveApproval: vi.fn().mockResolvedValue(undefined),
@@ -57,6 +62,7 @@ describe("OpsCodex app", () => {
       id: "thread-1",
       title: "Order service incident",
       status: "completed",
+      workspaceId: "default",
       events: [
         event(1, "user_message", { content: "Why is order-service failing?" }),
         event(2, "assistant_completed", { content: "The error rate is elevated." }),
@@ -110,6 +116,7 @@ describe("OpsCodex app", () => {
       id: "thread-1",
       title: "Inspect service",
       status: "running",
+      workspaceId: "default",
       events: [
         event(1, "turn_started", {}),
         event(2, "approval_required", {
@@ -133,6 +140,7 @@ describe("OpsCodex app", () => {
       id: "thread-1",
       title: "Checkout 5xx",
       status: "completed",
+      workspaceId: "default",
       events: [
         event(1, "user_message", {
           content: "Investigate checkout 5xx",
@@ -211,5 +219,102 @@ describe("OpsCodex app", () => {
       service: "order-service",
       environment: "staging",
     });
+  });
+
+  it("binds new threads to the selected workspace and jumps from topology to evidence", async () => {
+    const client = createClient({
+      id: "thread-1",
+      title: "Staging checkout",
+      status: "completed",
+      workspaceId: "staging",
+      events: [
+        event(1, "tool_started", {
+          tool_call_id: "call-1",
+          tool: "k8s_get",
+          arguments: { kind: "Pod", namespace: "checkout", name: "order-service" },
+        }),
+        event(2, "tool_completed", {
+          tool_call_id: "call-1",
+          tool: "k8s_get",
+          success: true,
+          output: {
+            content: {
+              cluster: "staging-cluster",
+              kind: "Pod",
+              namespace: "checkout",
+              name: "order-service",
+            },
+          },
+          evidence: { source: "kubernetes", evidence_id: "ev-k8s-1", summary: "Pod unready" },
+        }),
+        event(3, "tool_completed", {
+          tool_call_id: "call-2",
+          tool: "runbook_read",
+          success: true,
+          output: {
+            content: {
+              id: "order-service-db-pool",
+              title: "Order service DB pool exhaustion",
+              version: 1,
+              hash: "abc123def4567890",
+            },
+          },
+          evidence: { source: "runbook", evidence_id: "ev-rb-1" },
+        }),
+      ],
+    });
+    client.listWorkspaces = vi.fn().mockResolvedValue([
+      {
+        id: "staging",
+        displayName: "Staging",
+        environment: "staging",
+        connectors: ["kubernetes"],
+      },
+    ]);
+    client.listThreads = vi.fn().mockResolvedValue([
+      {
+        id: "thread-1",
+        title: "Staging checkout",
+        status: "completed",
+        workspaceId: "staging",
+      },
+    ]);
+    client.createThread = vi.fn().mockResolvedValue({ id: "thread-new", workspaceId: "staging" });
+    client.getTopology = vi.fn().mockResolvedValue({
+      nodes: [
+        {
+          id: "Pod:order-service",
+          kind: "Pod",
+          workspaceId: "staging",
+          evidenceIds: ["ev-k8s-1"],
+        },
+      ],
+      edges: [
+        {
+          from: "Service:order-service",
+          to: "Pod:order-service",
+          relation: "selects",
+          confidence: "medium",
+          source: "kubernetes",
+          evidenceIds: ["ev-k8s-1"],
+          stale: false,
+        },
+      ],
+    });
+
+    render(<App client={client} />);
+
+    expect((await screen.findAllByText("Staging checkout")).length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Staging").length).toBeGreaterThan(0);
+    expect(screen.getByLabelText("Workspace")).toHaveValue("staging");
+    expect(screen.getByText("staging-cluster · checkout · Pod · order-service")).toBeInTheDocument();
+    expect(screen.getByText(/Order service DB pool exhaustion v1/)).toBeInTheDocument();
+    expect(screen.getByText("Service topology")).toBeInTheDocument();
+
+    await userEvent.click(screen.getAllByRole("button", { name: "Evidence ev-k8s-1" })[0]);
+    expect(document.getElementById("evidence-ev-k8s-1")).toBeTruthy();
+
+    await userEvent.click(screen.getAllByRole("button", { name: /new thread/i })[0]);
+    expect(client.createThread).toHaveBeenCalledWith("staging");
   });
 });

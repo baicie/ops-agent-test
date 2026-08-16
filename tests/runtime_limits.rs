@@ -7,7 +7,7 @@ use opscodex::{
         FakeModelProvider, ModelEventSink, ModelOutput, ModelProvider, ModelRequest, ModelResponse,
     },
     policy::{ApprovalBroker, PolicyEngine},
-    runtime::{AgentRuntime, RuntimeConfig, RuntimeEvent, ThreadId, TurnId},
+    runtime::{AgentRuntime, RuntimeConfig, RuntimeEvent, ThreadId, TurnId, WorkspaceId},
     store::JsonlStore,
     tools::{FakeTool, ToolRegistry},
 };
@@ -97,8 +97,12 @@ async fn cancelling_while_waiting_for_global_slot_records_cancelled() -> anyhow:
     let store = Arc::new(JsonlStore::new(directory.path().join("threads")).await?);
     let first_thread = ThreadId::new();
     let second_thread = ThreadId::new();
-    store.create_thread(first_thread.clone()).await?;
-    store.create_thread(second_thread.clone()).await?;
+    store
+        .create_thread(first_thread.clone(), WorkspaceId::default())
+        .await?;
+    store
+        .create_thread(second_thread.clone(), WorkspaceId::default())
+        .await?;
     let runtime = Arc::new(AgentRuntime::new(
         model.clone(),
         ToolRegistry::new(),
@@ -178,7 +182,9 @@ async fn max_steps_bounds_repeated_tool_calls() -> anyhow::Result<()> {
     let directory = tempdir()?;
     let store = Arc::new(JsonlStore::new(directory.path().join("threads")).await?);
     let thread_id = ThreadId::new();
-    store.create_thread(thread_id.clone()).await?;
+    store
+        .create_thread(thread_id.clone(), WorkspaceId::default())
+        .await?;
     let runtime = AgentRuntime::new(
         model,
         tools,
@@ -238,7 +244,9 @@ async fn runtime_with(
     let directory = tempdir()?;
     let store = Arc::new(JsonlStore::new(directory.path().join("threads")).await?);
     let thread_id = ThreadId::new();
-    store.create_thread(thread_id.clone()).await?;
+    store
+        .create_thread(thread_id.clone(), WorkspaceId::default())
+        .await?;
     let runtime = AgentRuntime::new(
         model,
         tools,

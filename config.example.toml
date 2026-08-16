@@ -36,6 +36,18 @@ max_range_seconds = 3600
 allowed_containers = ["order-service"]
 allowed_hosts = ["localhost", "127.0.0.1", "order-service"]
 
+# Optional explicit workspaces. If omitted, the top-level prometheus/loki/tempo/targets
+# settings become the implicit `default` workspace. Credentials are environment variable
+# names only; never put kubeconfig tokens or API keys in this file.
+# [[workspaces]]
+# id = "staging"
+# display_name = "Staging"
+# environment = "staging"
+# kubeconfig_env = "STAGING_KUBECONFIG"
+# cluster_alias = "staging"
+# allowed_namespaces = ["checkout"]
+# runbook_dir = "runbooks"
+
 [tools]
 exec = false
 

@@ -25,13 +25,13 @@ phase's acceptance gate, and update an ADR before changing a recorded decision.
 
 - Hand-written Agent Runtime with Thread, Turn, Item, Context, Event and Tool abstractions
 - OpenAI Responses Provider with streaming text, function calls, usage and cancellation
-- `promql_query`, `docker_logs`, `http_get`, Loki `log_query`, Tempo `trace_search` / `trace_get`, and opt-in `exec`
+- `promql_query`, `docker_logs`, `http_get`, Loki `log_query`, Tempo `trace_search` / `trace_get`, read-only `k8s_get` / `k8s_events` / `k8s_logs`, `runbook_search` / `runbook_read`, `topology_query`, and opt-in `exec`
 - Safe/Ask/Forbidden policy decisions and interactive approval
 - Per-tool/model timeouts, 12-step default limit, 64 KiB output bounds and cancellation
 - One active Turn per Thread and four concurrent Turns globally by default
 - Append-only JSONL persistence with monotonic sequence numbers and reconnect replay
 - Axum REST API and SSE event stream
-- React/Vite UI for threads, Alert Context, streaming chat, tools, Evidence-linked Diagnosis, approvals and Stop
+- React/Vite UI for workspace selection, threads, Alert Context, streaming chat, tools, Topology, Evidence-linked Diagnosis, approvals and Stop
 - Deterministic order-service incident with Prometheus metrics and Docker logs
 
 ## Architecture
@@ -47,7 +47,7 @@ Agent Runtime ---- JSONL Thread Store
      |
      +---- ModelProvider ---- OpenAI-compatible Responses API
      |
-     +---- Tool Registry ---- Prometheus / Loki / Tempo / Docker / HTTP / approved Exec
+     +---- Tool Registry ---- Prometheus / Loki / Tempo / Kubernetes / Docker / HTTP / Runbooks / approved Exec
 ```
 
 The Runtime only depends on the project's `ModelProvider` contract. OpenAI request and SSE types stay inside `src/model/openai.rs`.
@@ -96,6 +96,7 @@ IFS= read -rs OPENAI_API_KEY
 printf '\n' >&2
 export OPENAI_API_KEY
 cargo run -- run "Why is order-service failing?" \
+  --workspace default \
   --service order-service --environment staging \
   --starts-at 2026-08-16T00:00:00Z --ends-at 2026-08-16T00:15:00Z
 unset OPENAI_API_KEY
@@ -162,12 +163,14 @@ Important defaults:
 ```text
 GET    /healthz
 GET    /metrics
+GET    /api/v1/workspaces
 GET    /api/v1/threads
 POST   /api/v1/threads
 GET    /api/v1/threads/:thread_id
 GET    /api/v1/threads/:thread_id?after=:seq&limit=:n&stream_kind=domain
 POST   /api/v1/threads/:thread_id/turns
 GET    /api/v1/threads/:thread_id/events?after=:seq
+GET    /api/v1/threads/:thread_id/topology
 GET    /api/v1/threads/:thread_id/evidence/:evidence_id
 GET    /api/v1/artifacts/:sha256
 POST   /api/v1/approvals/:approval_id
@@ -176,6 +179,9 @@ POST   /api/v1/turns/:turn_id/interrupt
 
 `/api` remains an alias for `/api/v1` during the compatibility window. Turns may include
 `incident_context`; Alert Context is an investigation hint and is not stored as Evidence.
+`POST /api/v1/threads` accepts `workspace_id` and defaults to `default`. A Thread cannot
+change Workspace after creation. `GET /api/v1/threads/:id/topology` returns the current
+Evidence projection, not a CMDB.
 
 SSE responses use the JSONL sequence as the SSE `id`. A reconnect with `after=N` replays all durable events after `N`, then switches to live broadcast events without duplicates.
 
@@ -189,7 +195,7 @@ Each Thread is a human-readable event log:
   threads/
     <thread-id>.jsonl
   artifacts/
-    <sha256>
+    <workspace-id>/<sha256-prefix>/<sha256>
 ```
 
 The Store serializes appends per process, validates monotonic sequence numbers, ignores an incomplete crash tail during replay, and repairs that tail before the next append.

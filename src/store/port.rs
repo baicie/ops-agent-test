@@ -6,7 +6,7 @@ use crate::{
     model::ModelItem,
     runtime::{
         ContextBudget, EventEnvelope, EventId, EvidenceId, ItemId, RuntimeEvent, StreamKind,
-        Thread, ThreadId, TurnId,
+        Thread, ThreadId, TurnId, WorkspaceId,
     },
 };
 
@@ -37,7 +37,11 @@ impl AppendEvent {
 
 #[async_trait]
 pub trait EventStore: Send + Sync {
-    async fn create_thread(&self, thread_id: ThreadId) -> Result<EventEnvelope>;
+    async fn create_thread(
+        &self,
+        thread_id: ThreadId,
+        workspace_id: WorkspaceId,
+    ) -> Result<EventEnvelope>;
     async fn append(
         &self,
         thread_id: &ThreadId,
@@ -51,6 +55,11 @@ pub trait EventStore: Send + Sync {
         after_seq: u64,
     ) -> Result<Vec<EventEnvelope>>;
     async fn get_thread(&self, thread_id: &ThreadId) -> Result<Thread>;
+    async fn get_thread_in(
+        &self,
+        workspace_id: &WorkspaceId,
+        thread_id: &ThreadId,
+    ) -> Result<Thread>;
     async fn list_threads(&self) -> Result<Vec<ThreadSummary>>;
     async fn last_seq(&self, thread_id: &ThreadId) -> Result<u64>;
     async fn model_history(&self, thread_id: &ThreadId, limit: usize) -> Result<Vec<ModelItem>>;
@@ -61,6 +70,12 @@ pub trait EventStore: Send + Sync {
     ) -> Result<Vec<ModelItem>>;
     async fn get_evidence(
         &self,
+        thread_id: &ThreadId,
+        evidence_id: &EvidenceId,
+    ) -> Result<EvidenceMeta>;
+    async fn get_evidence_in(
+        &self,
+        workspace_id: &WorkspaceId,
         thread_id: &ThreadId,
         evidence_id: &EvidenceId,
     ) -> Result<EvidenceMeta>;

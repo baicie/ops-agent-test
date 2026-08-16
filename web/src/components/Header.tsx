@@ -7,6 +7,7 @@ import { Button } from "./ui/button";
 
 interface HeaderProps {
   title: string;
+  workspaceLabel?: string | null;
   connectionStatus: ConnectionStatus;
   turnStatus: TurnStatus;
   onOpenSidebar: () => void;
@@ -56,7 +57,7 @@ function RuntimeStatus({
   );
 }
 
-export function Header({ title, connectionStatus, turnStatus, onOpenSidebar }: HeaderProps) {
+export function Header({ title, workspaceLabel, connectionStatus, turnStatus, onOpenSidebar }: HeaderProps) {
   return (
     <header className="flex h-16 shrink-0 items-center border-b border-zinc-200 bg-white px-3 sm:px-5">
       <Button
@@ -78,9 +79,16 @@ export function Header({ title, connectionStatus, turnStatus, onOpenSidebar }: H
         </h1>
         <p className="mt-0.5 truncate text-[11px] text-zinc-500">
           <span className="sm:hidden">{title}</span>
-          <span className="hidden sm:inline">Runtime investigation</span>
+          <span className="hidden sm:inline">
+            {workspaceLabel ? `Workspace ${workspaceLabel}` : "Runtime investigation"}
+          </span>
         </p>
       </div>
+      {workspaceLabel && (
+        <Badge className="mr-2 max-w-[9rem] truncate bg-zinc-50 text-zinc-600" title="Thread workspace is fixed">
+          {workspaceLabel}
+        </Badge>
+      )}
       <div className="ml-2 shrink-0">
         <RuntimeStatus connectionStatus={connectionStatus} turnStatus={turnStatus} />
       </div>

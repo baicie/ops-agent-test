@@ -6,6 +6,39 @@ export interface ThreadSummary {
   title?: string | null;
   createdAt?: string;
   updatedAt?: string;
+  workspaceId?: string | null;
+}
+
+export interface WorkspaceSummary {
+  id: string;
+  displayName: string;
+  environment: string;
+  connectors: string[];
+}
+
+export interface TopologyNode {
+  id: string;
+  kind: string;
+  workspaceId: string;
+  evidenceIds: string[];
+  observedAt?: string;
+}
+
+export interface TopologyEdge {
+  from: string;
+  to: string;
+  relation: string;
+  confidence: string;
+  source: string;
+  evidenceIds: string[];
+  observedAt?: string;
+  expiresAt?: string;
+  stale: boolean;
+}
+
+export interface TopologyGraph {
+  nodes: TopologyNode[];
+  edges: TopologyEdge[];
 }
 
 export interface ThreadDetail extends ThreadSummary {

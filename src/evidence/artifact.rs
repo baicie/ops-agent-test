@@ -45,16 +45,21 @@ impl ArtifactStore {
     }
 
     pub async fn put(&self, bytes: &[u8]) -> Result<String> {
+        self.put_in("default", bytes).await
+    }
+
+    pub async fn put_in(&self, workspace_id: &str, bytes: &[u8]) -> Result<String> {
         let digest = sha256_hex(bytes);
+        let key = scoped_key(workspace_id, &digest);
         match &self.backend {
             Backend::Memory(store) => {
                 store
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .insert(digest.clone(), bytes.to_vec());
+                    .insert(key, bytes.to_vec());
             }
             Backend::Disk(directory) => {
-                let path = artifact_path(directory, &digest);
+                let path = artifact_path(directory, workspace_id, &digest);
                 if let Some(parent) = path.parent() {
                     fs::create_dir_all(parent).await.map_err(|error| {
                         OpsCodexError::Storage(format!(
@@ -77,19 +82,29 @@ impl ArtifactStore {
     }
 
     pub async fn get(&self, sha256: &str, max_bytes: usize) -> Result<Vec<u8>> {
+        self.get_in("default", sha256, max_bytes).await
+    }
+
+    pub async fn get_in(
+        &self,
+        workspace_id: &str,
+        sha256: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>> {
         if !is_sha256(sha256) {
             return Err(OpsCodexError::Protocol("invalid artifact id".into()));
         }
         let max_bytes = max_bytes.min(self.max_bytes).max(1);
+        let key = scoped_key(workspace_id, sha256);
         let bytes = match &self.backend {
             Backend::Memory(store) => store
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .get(sha256)
+                .get(&key)
                 .cloned()
                 .ok_or_else(|| OpsCodexError::NotFound(format!("artifact {sha256}")))?,
             Backend::Disk(directory) => {
-                let path = artifact_path(directory, sha256);
+                let path = artifact_path(directory, workspace_id, sha256);
                 fs::read(&path).await.map_err(|error| {
                     if error.kind() == std::io::ErrorKind::NotFound {
                         OpsCodexError::NotFound(format!("artifact {sha256}"))
@@ -106,9 +121,13 @@ impl ArtifactStore {
     }
 }
 
-fn artifact_path(directory: &std::path::Path, sha256: &str) -> PathBuf {
+fn scoped_key(workspace_id: &str, sha256: &str) -> String {
+    format!("{workspace_id}/{sha256}")
+}
+
+fn artifact_path(directory: &std::path::Path, workspace_id: &str, sha256: &str) -> PathBuf {
     let prefix = sha256.get(..2).unwrap_or("00");
-    directory.join(prefix).join(sha256)
+    directory.join(workspace_id).join(prefix).join(sha256)
 }
 
 fn is_sha256(value: &str) -> bool {

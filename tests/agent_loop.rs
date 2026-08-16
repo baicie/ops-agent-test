@@ -3,7 +3,7 @@ use std::sync::Arc;
 use opscodex::{
     model::{FakeModelProvider, ModelOutput, ModelResponse},
     policy::{ApprovalBroker, PolicyEngine},
-    runtime::{AgentRuntime, RuntimeConfig, RuntimeEvent, ThreadId, TurnId},
+    runtime::{AgentRuntime, RuntimeConfig, RuntimeEvent, ThreadId, TurnId, WorkspaceId},
     store::JsonlStore,
     tools::{FakeTool, ToolRegistry},
 };
@@ -41,7 +41,9 @@ async fn model_tool_evidence_model_answer_closes_the_turn() -> anyhow::Result<()
     );
     let thread_id = ThreadId::new();
     let turn_id = TurnId::new();
-    store.create_thread(thread_id.clone()).await?;
+    store
+        .create_thread(thread_id.clone(), WorkspaceId::default())
+        .await?;
     let (events, mut receiver) = broadcast::channel(32);
 
     runtime

@@ -10,7 +10,7 @@
 | Design Gate | 完成 | 最终目标、目标架构、阶段设计、ADR | 文档链接和追踪关系有效 |
 | [`v0.1`](phases/v0.1-runtime-mvp.md) | 已发布 | Rust Runtime MVP 跑通真实诊断闭环 | CI、真实 Provider、Demo E2E |
 | [`v0.2`](phases/v0.2-evidence-foundation.md) | 实现中 | 稳定协议和 Evidence 基础，接入 Logs/Trace/Alert | 多信号 Claim 引用与脱敏评测 |
-| [`v0.3`](phases/v0.3-runtime-workspace.md) | 计划中 | Workspace、Kubernetes、Topology、Runbook | 只读 K8s 场景与目标隔离 |
+| [`v0.3`](phases/v0.3-runtime-workspace.md) | 实现中 | Workspace、Kubernetes、Topology、Runbook | 只读 K8s 场景与目标隔离 |
 | [`v0.4`](phases/v0.4-extensibility.md) | 计划中 | 受约束 MCP、Custom Tool、Skill | 不可信扩展生命周期与策略测试 |
 | [`v0.5`](phases/v0.5-continuity.md) | 计划中 | SQLite、Compaction、Fork、Resume | 全崩溃边界恢复与迁移测试 |
 | [`v0.6`](phases/v0.6-safe-remediation.md) | 计划中 | 结构化安全修复和持久审计 | 零未批准动作、重放/越权防护 |

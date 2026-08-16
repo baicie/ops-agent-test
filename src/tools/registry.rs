@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     OpsCodexError, Result,
     model::ToolSchema,
-    tools::{Tool, ToolOutput, ToolRisk},
+    tools::{Tool, ToolInvocation, ToolOutput, ToolRisk},
 };
 
 #[derive(Clone, Default)]
@@ -73,10 +73,22 @@ impl ToolRegistry {
         arguments: Value,
         cancellation: CancellationToken,
     ) -> Result<ToolOutput> {
-        if cancellation.is_cancelled() {
+        self.execute_with_context(name, arguments, ToolInvocation::new(cancellation))
+            .await
+    }
+
+    pub async fn execute_with_context(
+        &self,
+        name: &str,
+        arguments: Value,
+        invocation: ToolInvocation,
+    ) -> Result<ToolOutput> {
+        if invocation.cancellation.is_cancelled() {
             return Err(OpsCodexError::Cancelled);
         }
-        self.tool(name)?.execute(arguments, cancellation).await
+        self.tool(name)?
+            .execute_with_context(arguments, invocation)
+            .await
     }
 
     fn tool(&self, name: &str) -> Result<&Arc<dyn Tool>> {

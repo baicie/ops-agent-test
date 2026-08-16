@@ -31,7 +31,7 @@ export type OpsAction =
   | { type: "threads/loading" }
   | { type: "threads/loaded"; payload: ThreadSummary[] }
   | { type: "threads/failed"; payload: string }
-  | { type: "thread/select"; payload: string }
+  | { type: "thread/select"; payload: string | null }
   | { type: "thread/created"; payload: ThreadSummary }
   | { type: "thread/loading" }
   | { type: "thread/loaded"; payload: ThreadDetail }
@@ -442,6 +442,25 @@ export function opsReducer(state: OpsState, action: OpsAction): OpsState {
     case "threads/failed":
       return { ...state, loadStatus: "error", error: action.payload };
     case "thread/select":
+      if (action.payload === state.activeThreadId && action.payload !== null) {
+        return { ...state, sidebarOpen: false };
+      }
+      if (!action.payload) {
+        return {
+          ...state,
+          activeThreadId: null,
+          activeTurnId: null,
+          items: [],
+          lastSeq: 0,
+          loadStatus: "ready",
+          connectionStatus: "idle",
+          turnStatus: "idle",
+          sidebarOpen: false,
+          error: null,
+          selectedEvidenceId: null,
+          clientUpgradeHint: null,
+        };
+      }
       return {
         ...state,
         activeThreadId: action.payload,
@@ -482,6 +501,7 @@ export function opsReducer(state: OpsState, action: OpsAction): OpsState {
                       ...thread,
                       status: action.payload.status,
                       title: action.payload.title ?? thread.title,
+                      workspaceId: action.payload.workspaceId ?? thread.workspaceId,
                       createdAt: action.payload.createdAt ?? thread.createdAt,
                       updatedAt: action.payload.updatedAt ?? thread.updatedAt,
                     }

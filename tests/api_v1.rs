@@ -111,6 +111,80 @@ async fn legacy_routes_still_create_threads() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn workspaces_are_listed_and_threads_cannot_cross_scope() -> anyhow::Result<()> {
+    let config = opscodex::config::Config::from_toml(
+        r#"
+        [[workspaces]]
+        id = "staging"
+        display_name = "Staging"
+        environment = "staging"
+        "#,
+    )?;
+    let catalog = opscodex::workspace::WorkspaceCatalog::from_config(&config)?;
+    let directory = TempDir::new()?;
+    let store = Arc::new(JsonlStore::new(directory.path().join("threads")).await?);
+    let runtime = Arc::new(
+        AgentRuntime::new(
+            Arc::new(FakeModelProvider::new(vec![])),
+            ToolRegistry::new(),
+            PolicyEngine::new(Arc::new(ApprovalBroker::new())),
+            store,
+            RuntimeConfig::default(),
+        )
+        .with_workspaces(catalog, Default::default()),
+    );
+    let app = router(ServerState::new(runtime));
+
+    let listed = app
+        .clone()
+        .oneshot(request("GET", "/api/v1/workspaces", None))
+        .await?;
+    assert_eq!(listed.status(), StatusCode::OK);
+    let listed: Value = serde_json::from_slice(&listed.into_body().collect().await?.to_bytes())?;
+    assert!(
+        listed["workspaces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == "staging")
+    );
+
+    let denied = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/threads",
+            Some(json!({"workspace_id": "production"})),
+        ))
+        .await?;
+    assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+
+    let created = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/api/v1/threads",
+            Some(json!({"workspace_id": "staging"})),
+        ))
+        .await?;
+    assert_eq!(created.status(), StatusCode::CREATED);
+    let created: Value = serde_json::from_slice(&created.into_body().collect().await?.to_bytes())?;
+    assert_eq!(created["workspace_id"], "staging");
+    let thread_id = created["id"].as_str().unwrap();
+
+    let crossed = app
+        .clone()
+        .oneshot(request(
+            "GET",
+            &format!("/api/v1/threads/{thread_id}/topology?workspace_id=production"),
+            None,
+        ))
+        .await?;
+    assert_eq!(crossed.status(), StatusCode::FORBIDDEN);
+    Ok(())
+}
+
 fn request(method: &str, uri: &str, body: Option<Value>) -> Request<Body> {
     let mut builder = Request::builder().method(method).uri(uri);
     let body = match body {

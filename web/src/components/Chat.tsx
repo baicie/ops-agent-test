@@ -1,16 +1,18 @@
 import { AlertCircle, Info, Plus, SearchCode, X } from "lucide-react";
 import { useEffect, useRef } from "react";
 
-import type { IncidentContext, OpsState } from "../types";
+import type { IncidentContext, OpsState, TopologyGraph } from "../types";
 import { Approval } from "./Approval";
 import { Composer } from "./Composer";
 import { Message } from "./Message";
 import { ToolCall } from "./ToolCall";
+import { Topology } from "./Topology";
 import { Button } from "./ui/button";
 import { ScrollArea } from "./ui/scroll-area";
 
 interface ChatProps {
   state: OpsState;
+  topology: TopologyGraph | null;
   hasThread: boolean;
   stopping: boolean;
   resolvingApprovals: Set<string>;
@@ -30,6 +32,7 @@ function evidenceIdOf(item: OpsState["items"][number]): string | undefined {
 
 export function Chat({
   state,
+  topology,
   hasThread,
   stopping,
   resolvingApprovals,
@@ -119,6 +122,13 @@ export function Chat({
           </div>
         ) : (
           <div className="mx-auto w-full max-w-3xl space-y-7 px-4 py-8 sm:px-8 sm:py-10">
+            {topology && (
+              <Topology
+                graph={topology}
+                selectedEvidenceId={state.selectedEvidenceId}
+                onSelectEvidence={onSelectEvidence}
+              />
+            )}
             {state.items.map((item) => {
               if (item.kind === "message") {
                 return (

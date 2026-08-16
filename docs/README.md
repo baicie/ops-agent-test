@@ -27,7 +27,7 @@ Issue、聊天记录或代码注释中。
 | Design Gate | 完成 | 本目录及 ADR 基线 |
 | `v0.1` Runtime MVP | 已发布 | [v0.1](phases/v0.1-runtime-mvp.md) |
 | `v0.2` Evidence Foundation | 实现中 | [v0.2](phases/v0.2-evidence-foundation.md) |
-| `v0.3` Runtime Workspace | 计划中 | [v0.3](phases/v0.3-runtime-workspace.md) |
+| `v0.3` Runtime Workspace | 实现中 | [v0.3](phases/v0.3-runtime-workspace.md) |
 | `v0.4` Extensibility | 计划中 | [v0.4](phases/v0.4-extensibility.md) |
 | `v0.5` Continuity | 计划中 | [v0.5](phases/v0.5-continuity.md) |
 | `v0.6` Safe Remediation | 计划中 | [v0.6](phases/v0.6-safe-remediation.md) |
@@ -60,4 +60,6 @@ Issue、聊天记录或代码注释中。
 运行中的 Turn、审批和并发租约仍在进程内，重启后只能查看历史，不能安全续跑。这一限制由
 `v0.5` 解决，不能在此前把系统宣传为可恢复执行。`v0.2` Evidence Foundation 正在实现中：
 协议、Evidence/Claim、Loki/Tempo 和评测骨架已经落地，真实 Provider live gate 尚未作为
-发布门禁跑过，因此该阶段不能标为已发布。
+发布门禁跑过，因此该阶段不能标为已发布。`v0.3` Runtime Workspace 正在实现中：Workspace
+隔离、只读 Kubernetes、Topology 投影和本地 Runbook 已经落地，真实 cluster smoke 与
+Provider gate 尚未跑过，因此也不能标为已发布。

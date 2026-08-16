@@ -287,4 +287,12 @@ describe("opsReducer runtime events", () => {
     ]);
     expect(next.items.some((item) => item.kind === "tool")).toBe(false);
   });
+
+  it("clears the active investigation when workspace selection has no threads", () => {
+    const selected = opsReducer(initialState, { type: "thread/select", payload: "thread-1" });
+    const cleared = opsReducer(selected, { type: "thread/select", payload: null });
+    expect(cleared.activeThreadId).toBeNull();
+    expect(cleared.items).toEqual([]);
+    expect(cleared.loadStatus).toBe("ready");
+  });
 });

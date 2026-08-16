@@ -12,7 +12,7 @@ use opscodex::{
         FakeModelProvider, ModelEventSink, ModelOutput, ModelProvider, ModelRequest, ModelResponse,
     },
     policy::{ApprovalBroker, PolicyEngine},
-    runtime::{AgentRuntime, RuntimeConfig, RuntimeEvent, ThreadId},
+    runtime::{AgentRuntime, RuntimeConfig, RuntimeEvent, ThreadId, WorkspaceId},
     server::{ServerState, router, router_with_web},
     store::JsonlStore,
     tools::{FakeTool, ToolRegistry},
@@ -121,7 +121,9 @@ async fn sse_replays_events_strictly_after_the_requested_sequence() -> anyhow::R
     let (state, _directory) = fake_state().await?;
     let store = state.runtime().store();
     let thread_id = ThreadId::new();
-    store.create_thread(thread_id.clone()).await?;
+    store
+        .create_thread(thread_id.clone(), WorkspaceId::default())
+        .await?;
     store
         .append(&thread_id, None, RuntimeEvent::user_message("replayed"))
         .await?;
@@ -160,7 +162,9 @@ async fn sse_reconnect_honors_last_event_id() -> anyhow::Result<()> {
     let (state, _directory) = fake_state().await?;
     let store = state.runtime().store();
     let thread_id = ThreadId::new();
-    store.create_thread(thread_id.clone()).await?;
+    store
+        .create_thread(thread_id.clone(), WorkspaceId::default())
+        .await?;
     for content in ["already seen", "resume here"] {
         store
             .append(&thread_id, None, RuntimeEvent::user_message(content))

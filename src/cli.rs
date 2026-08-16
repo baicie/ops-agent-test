@@ -48,6 +48,8 @@ pub enum Command {
         starts_at: Option<String>,
         #[arg(long)]
         ends_at: Option<String>,
+        #[arg(long)]
+        workspace: Option<String>,
     },
     Serve {
         #[arg(long)]
@@ -73,9 +75,10 @@ pub async fn execute(cli: Cli) -> Result<()> {
             environment,
             starts_at,
             ends_at,
+            workspace,
         } => {
             let incident_context = incident_from_flags(service, environment, starts_at, ends_at)?;
-            run(runtime, input, incident_context).await
+            run(runtime, input, incident_context, workspace).await
         }
         Command::Serve {
             host,
@@ -97,9 +100,20 @@ async fn run(
     runtime: std::sync::Arc<AgentRuntime>,
     input: String,
     incident_context: Option<IncidentContext>,
+    workspace: Option<String>,
 ) -> Result<()> {
+    let workspace_id = workspace
+        .map(crate::runtime::WorkspaceId::new)
+        .unwrap_or_default();
+    workspace_id.validate()?;
+    if !runtime.workspaces().is_empty() {
+        runtime.workspaces().require(&workspace_id)?;
+    }
     let thread_id = ThreadId::new();
-    runtime.store().create_thread(thread_id.clone()).await?;
+    runtime
+        .store()
+        .create_thread(thread_id.clone(), workspace_id)
+        .await?;
     let turn_id = TurnId::new();
     let cancellation = CancellationToken::new();
     let (events, receiver) = broadcast::channel(256);

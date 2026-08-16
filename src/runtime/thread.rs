@@ -66,6 +66,24 @@ impl WorkspaceId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub fn validate(&self) -> crate::Result<()> {
+        let value = self.0.trim();
+        if value.is_empty() || value.len() > 64 {
+            return Err(crate::OpsCodexError::Protocol(
+                "workspace id must be 1-64 characters".into(),
+            ));
+        }
+        if !value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+        {
+            return Err(crate::OpsCodexError::Protocol(
+                "workspace id must be alphanumeric, dash, or underscore".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Default for WorkspaceId {
@@ -136,6 +154,7 @@ pub enum Item {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Thread {
     pub id: ThreadId,
+    pub workspace_id: WorkspaceId,
     pub items: Vec<Item>,
     pub status: ThreadStatus,
     pub created_at: DateTime<Utc>,

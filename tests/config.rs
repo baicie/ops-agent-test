@@ -53,3 +53,33 @@ fn reasoning_effort_is_optional_and_rejects_unknown_values() -> anyhow::Result<(
     assert!(error.to_string().contains("reasoning_effort"));
     Ok(())
 }
+
+#[test]
+fn workspace_ids_must_be_unique_and_valid() -> anyhow::Result<()> {
+    let config = Config::from_toml(
+        r#"
+        [[workspaces]]
+        id = "staging"
+        kubeconfig_env = "STAGING_KUBECONFIG"
+        "#,
+    )?;
+    assert_eq!(
+        config.workspaces[0].kubeconfig_env.as_deref(),
+        Some("STAGING_KUBECONFIG")
+    );
+
+    let duplicate = Config::from_toml(
+        r#"
+        [[workspaces]]
+        id = "staging"
+        [[workspaces]]
+        id = "staging"
+        "#,
+    )
+    .unwrap_err();
+    assert!(duplicate.to_string().contains("duplicate workspace"));
+
+    let invalid = Config::from_toml("[[workspaces]]\nid = \"prod/cluster\"").unwrap_err();
+    assert!(invalid.to_string().contains("workspace id"));
+    Ok(())
+}

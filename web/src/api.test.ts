@@ -50,9 +50,10 @@ describe("OpsCodex API client", () => {
       status: "running",
       createdAt: "2026-08-14T12:00:00Z",
       updatedAt: "2026-08-14T12:02:00Z",
+      workspaceId: null,
     });
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://localhost:3000/api/threads",
+      "http://localhost:3000/api/v1/threads",
       expect.objectContaining({ headers: { accept: "application/json" } }),
     );
   });
@@ -96,7 +97,7 @@ describe("OpsCodex API client", () => {
     await api.resolveApproval("approval-1", true);
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/approvals/approval-1",
+      "/api/v1/approvals/approval-1",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({ approved: true }),
@@ -169,7 +170,7 @@ describe("OpsCodex API client", () => {
     const subscription = api.subscribe("thread/one", 7, { onEvent });
 
     expect(FakeEventSource.instance.url).toBe(
-      "http://localhost:3000/api/threads/thread%2Fone/events?after=7",
+      "http://localhost:3000/api/v1/threads/thread%2Fone/events?after=7",
     );
 
     FakeEventSource.instance.emit("assistant_delta", {
@@ -212,7 +213,7 @@ describe("OpsCodex API client", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/threads/thread-1/turns",
+      "/api/v1/threads/thread-1/turns",
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({
@@ -220,6 +221,70 @@ describe("OpsCodex API client", () => {
           incident_context: { service: "order-service", environment: "staging" },
         }),
       }),
+    );
+  });
+
+  it("lists workspaces and creates a thread in the selected workspace", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          workspaces: [
+            {
+              id: "staging",
+              display_name: "Staging",
+              environment: "staging",
+              connectors: ["kubernetes"],
+            },
+          ],
+        }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ id: "thread-1", workspace_id: "staging" }, { status: 201 }));
+
+    const api = createApiClient("");
+    const workspaces = await api.listWorkspaces();
+    expect(workspaces[0]).toEqual({
+      id: "staging",
+      displayName: "Staging",
+      environment: "staging",
+      connectors: ["kubernetes"],
+    });
+
+    const created = await api.createThread("staging");
+    expect(created).toEqual({ id: "thread-1", workspaceId: "staging" });
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/v1/threads",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ workspace_id: "staging" }),
+      }),
+    );
+  });
+
+  it("loads a thread topology projection", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        nodes: [{ id: "service:order-service", kind: "service", workspace_id: "staging", evidence_ids: ["ev-1"] }],
+        edges: [
+          {
+            from: "service:checkout-ui",
+            to: "service:order-service",
+            relation: "calls",
+            confidence: "high",
+            source: "trace",
+            evidence_ids: ["ev-1"],
+            stale: false,
+          },
+        ],
+      }),
+    );
+
+    const api = createApiClient("");
+    const graph = await api.getTopology("thread-1", "staging");
+    expect(graph.nodes[0]?.evidenceIds).toEqual(["ev-1"]);
+    expect(graph.edges[0]?.source).toBe("trace");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/v1/threads/thread-1/topology?workspace_id=staging",
+      expect.objectContaining({ headers: { accept: "application/json" } }),
     );
   });
 });

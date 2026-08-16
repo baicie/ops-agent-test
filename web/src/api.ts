@@ -4,6 +4,10 @@ import type {
   RuntimeEventType,
   ThreadDetail,
   ThreadSummary,
+  TopologyEdge,
+  TopologyGraph,
+  TopologyNode,
+  WorkspaceSummary,
 } from "./types";
 
 const EVENT_TYPES: RuntimeEventType[] = [
@@ -44,9 +48,11 @@ interface SubscribeCallbacks {
 }
 
 export interface OpsApiClient {
-  listThreads(): Promise<ThreadSummary[]>;
-  createThread(): Promise<{ id: string }>;
+  listWorkspaces(): Promise<WorkspaceSummary[]>;
+  listThreads(workspaceId?: string): Promise<ThreadSummary[]>;
+  createThread(workspaceId?: string): Promise<{ id: string; workspaceId: string }>;
   getThread(threadId: string): Promise<ThreadDetail>;
+  getTopology(threadId: string, workspaceId?: string): Promise<TopologyGraph>;
   startTurn(threadId: string, input: string, incidentContext?: IncidentContext | null): Promise<{ turnId: string; status: string }>;
   interruptTurn(turnId: string): Promise<void>;
   resolveApproval(approvalId: string, approved: boolean): Promise<void>;
@@ -129,6 +135,20 @@ export function normalizeEventEnvelope(
   };
 }
 
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function normalizeWorkspace(value: unknown): WorkspaceSummary {
+  const workspace = asRecord(value);
+  return {
+    id: asString(workspace.id) ?? "",
+    displayName: asString(workspace.display_name) ?? asString(workspace.displayName) ?? asString(workspace.id) ?? "",
+    environment: asString(workspace.environment) ?? "local",
+    connectors: stringList(workspace.connectors),
+  };
+}
+
 function normalizeThread(value: unknown): ThreadSummary {
   const thread = asRecord(value);
   return {
@@ -137,6 +157,46 @@ function normalizeThread(value: unknown): ThreadSummary {
     title: asString(thread.title) ?? null,
     createdAt: asString(thread.created_at) ?? asString(thread.createdAt),
     updatedAt: asString(thread.updated_at) ?? asString(thread.updatedAt),
+    workspaceId: asString(thread.workspace_id) ?? asString(thread.workspaceId) ?? null,
+  };
+}
+
+function normalizeTopologyNode(value: unknown): TopologyNode | null {
+  const node = asRecord(value);
+  const id = asString(node.id);
+  if (!id) return null;
+  return {
+    id,
+    kind: asString(node.kind) ?? "service",
+    workspaceId: asString(node.workspace_id) ?? asString(node.workspaceId) ?? "",
+    evidenceIds: stringList(node.evidence_ids ?? node.evidenceIds),
+    observedAt: asString(node.observed_at) ?? asString(node.observedAt),
+  };
+}
+
+function normalizeTopologyEdge(value: unknown): TopologyEdge | null {
+  const edge = asRecord(value);
+  const from = asString(edge.from);
+  const to = asString(edge.to);
+  if (!from || !to) return null;
+  return {
+    from,
+    to,
+    relation: asString(edge.relation) ?? "related",
+    confidence: asString(edge.confidence) ?? "medium",
+    source: asString(edge.source) ?? "inferred",
+    evidenceIds: stringList(edge.evidence_ids ?? edge.evidenceIds),
+    observedAt: asString(edge.observed_at) ?? asString(edge.observedAt),
+    expiresAt: asString(edge.expires_at) ?? asString(edge.expiresAt),
+    stale: edge.stale === true,
+  };
+}
+
+function normalizeTopology(value: unknown): TopologyGraph {
+  const graph = asRecord(value);
+  return {
+    nodes: (Array.isArray(graph.nodes) ? graph.nodes : []).map(normalizeTopologyNode).filter((node): node is TopologyNode => Boolean(node)),
+    edges: (Array.isArray(graph.edges) ? graph.edges : []).map(normalizeTopologyEdge).filter((edge): edge is TopologyEdge => Boolean(edge)),
   };
 }
 
@@ -183,22 +243,41 @@ export function createApiClient(
   const apiUrl = (path: string) => joinUrl(baseUrl, path);
 
   return {
-    async listThreads() {
-      const body = await request<unknown>(apiUrl("/api/threads"));
+    async listWorkspaces() {
+      const body = await request<unknown>(apiUrl("/api/v1/workspaces"));
+      const workspaces = Array.isArray(body) ? body : asRecord(body).workspaces;
+      return (Array.isArray(workspaces) ? workspaces : [])
+        .map(normalizeWorkspace)
+        .filter((workspace) => workspace.id);
+    },
+
+    async listThreads(workspaceId) {
+      const params = new URLSearchParams();
+      if (workspaceId) params.set("workspace_id", workspaceId);
+      const query = params.size > 0 ? `?${params.toString()}` : "";
+      const body = await request<unknown>(apiUrl(`/api/v1/threads${query}`));
       const threads = Array.isArray(body) ? body : asRecord(body).threads;
       return (Array.isArray(threads) ? threads : []).map(normalizeThread).filter((thread) => thread.id);
     },
 
-    async createThread() {
-      const body = asRecord(await request<unknown>(apiUrl("/api/threads"), { method: "POST" }));
+    async createThread(workspaceId) {
+      const body = asRecord(
+        await request<unknown>(apiUrl("/api/v1/threads"), {
+          method: "POST",
+          body: JSON.stringify(workspaceId ? { workspace_id: workspaceId } : {}),
+        }),
+      );
       const id = asString(body.id);
       if (!id) throw new Error("The server created a thread without returning its id.");
-      return { id };
+      return {
+        id,
+        workspaceId: asString(body.workspace_id) ?? asString(body.workspaceId) ?? workspaceId ?? "default",
+      };
     },
 
     async getThread(threadId) {
       const body = asRecord(
-        await request<unknown>(apiUrl(`/api/threads/${encodeURIComponent(threadId)}`)),
+        await request<unknown>(apiUrl(`/api/v1/threads/${encodeURIComponent(threadId)}`)),
       );
       const thread = normalizeThread(body);
       const rawEvents = Array.isArray(body.events) ? body.events : [];
@@ -209,9 +288,19 @@ export function createApiClient(
       };
     },
 
+    async getTopology(threadId, workspaceId) {
+      const params = new URLSearchParams();
+      if (workspaceId) params.set("workspace_id", workspaceId);
+      const query = params.size > 0 ? `?${params.toString()}` : "";
+      const body = await request<unknown>(
+        apiUrl(`/api/v1/threads/${encodeURIComponent(threadId)}/topology${query}`),
+      );
+      return normalizeTopology(body);
+    },
+
     async startTurn(threadId, input, incidentContext) {
       const body = asRecord(
-        await request<unknown>(apiUrl(`/api/threads/${encodeURIComponent(threadId)}/turns`), {
+        await request<unknown>(apiUrl(`/api/v1/threads/${encodeURIComponent(threadId)}/turns`), {
           method: "POST",
           body: JSON.stringify({
             input,
@@ -225,13 +314,13 @@ export function createApiClient(
     },
 
     async interruptTurn(turnId) {
-      await request<unknown>(apiUrl(`/api/turns/${encodeURIComponent(turnId)}/interrupt`), {
+      await request<unknown>(apiUrl(`/api/v1/turns/${encodeURIComponent(turnId)}/interrupt`), {
         method: "POST",
       });
     },
 
     async resolveApproval(approvalId, approved) {
-      await request<unknown>(apiUrl(`/api/approvals/${encodeURIComponent(approvalId)}`), {
+      await request<unknown>(apiUrl(`/api/v1/approvals/${encodeURIComponent(approvalId)}`), {
         method: "POST",
         body: JSON.stringify({ approved }),
       });
@@ -243,7 +332,7 @@ export function createApiClient(
       if (after > 0) params.set("after", String(after));
       const query = params.size > 0 ? `?${params.toString()}` : "";
       const source = new EventSourceImpl(
-        apiUrl(`/api/threads/${encodeURIComponent(threadId)}/events${query}`),
+        apiUrl(`/api/v1/threads/${encodeURIComponent(threadId)}/events${query}`),
       );
 
       source.onopen = () => callbacks.onOpen?.();

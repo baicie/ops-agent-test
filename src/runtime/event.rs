@@ -202,6 +202,11 @@ impl EventEnvelope {
             event,
         }
     }
+
+    pub fn with_workspace(mut self, workspace_id: WorkspaceId) -> Self {
+        self.workspace_id = workspace_id;
+        self
+    }
 }
 
 impl Serialize for EventEnvelope {

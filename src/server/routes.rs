@@ -15,18 +15,21 @@ use crate::{
     OpsCodexError,
     runtime::{
         ApprovalId, EventEnvelope, EvidenceId, IncidentContext, Item, StreamKind, Thread, ThreadId,
-        TurnId, TurnInput,
+        TurnId, TurnInput, WorkspaceId,
     },
+    topology::{TopologyQuery, project_topology, query_topology},
 };
 
 use super::{ServerState, sse};
 
 pub(crate) fn api_router(state: ServerState) -> Router {
     let api = Router::new()
+        .route("/workspaces", get(list_workspaces))
         .route("/threads", get(list_threads).post(create_thread))
         .route("/threads/{thread_id}", get(get_thread))
         .route("/threads/{thread_id}/turns", post(create_turn))
         .route("/threads/{thread_id}/events", get(sse::thread_events))
+        .route("/threads/{thread_id}/topology", get(get_topology))
         .route(
             "/threads/{thread_id}/evidence/{evidence_id}",
             get(get_evidence),
@@ -63,17 +66,38 @@ async fn metrics(State(state): State<ServerState>) -> impl IntoResponse {
     )
 }
 
-async fn list_threads(State(state): State<ServerState>) -> ApiResult<impl IntoResponse> {
-    Ok(Json(state.runtime.store().list_threads().await?))
+async fn list_workspaces(State(state): State<ServerState>) -> Json<serde_json::Value> {
+    Json(json!({ "workspaces": state.runtime.workspaces().summaries() }))
+}
+
+async fn list_threads(
+    State(state): State<ServerState>,
+    Query(query): Query<ThreadListQuery>,
+) -> ApiResult<impl IntoResponse> {
+    let mut threads = state.runtime.store().list_threads().await?;
+    if let Some(workspace_id) = query.workspace_id {
+        let workspace_id = WorkspaceId::new(workspace_id);
+        workspace_id.validate()?;
+        threads.retain(|thread| thread.workspace_id == workspace_id);
+    }
+    Ok(Json(threads))
+}
+
+#[derive(Default, Deserialize)]
+struct ThreadListQuery {
+    workspace_id: Option<String>,
 }
 
 #[derive(Serialize)]
 struct CreateThreadResponse {
     id: ThreadId,
+    workspace_id: WorkspaceId,
 }
 
 #[derive(Default, Deserialize)]
 struct CreateThreadRequest {
+    #[serde(default)]
+    workspace_id: Option<String>,
     #[serde(default)]
     incident_context: Option<IncidentContext>,
 }
@@ -82,21 +106,31 @@ async fn create_thread(
     State(state): State<ServerState>,
     body: Option<Json<CreateThreadRequest>>,
 ) -> ApiResult<impl IntoResponse> {
-    if let Some(Json(request)) = &body
-        && let Some(context) = &request.incident_context
-    {
+    let request = body.map(|Json(request)| request).unwrap_or_default();
+    if let Some(context) = &request.incident_context {
         context.validate()?;
+    }
+    let workspace_id = request
+        .workspace_id
+        .map(WorkspaceId::new)
+        .unwrap_or_default();
+    workspace_id.validate()?;
+    if !state.runtime.workspaces().is_empty() {
+        state.runtime.workspaces().require(&workspace_id)?;
     }
     let thread_id = ThreadId::new();
     let created = state
         .runtime
         .store()
-        .create_thread(thread_id.clone())
+        .create_thread(thread_id.clone(), workspace_id.clone())
         .await?;
     let _ = state.event_hub.sender(&thread_id).send(created);
     Ok((
         StatusCode::CREATED,
-        Json(CreateThreadResponse { id: thread_id }),
+        Json(CreateThreadResponse {
+            id: thread_id,
+            workspace_id,
+        }),
     ))
 }
 
@@ -266,24 +300,71 @@ async fn interrupt_turn(
     ))
 }
 
+async fn get_topology(
+    State(state): State<ServerState>,
+    Path(thread_id): Path<String>,
+    Query(query): Query<TopologyApiQuery>,
+) -> ApiResult<impl IntoResponse> {
+    let thread_id = parse_id::<ThreadId>("thread", &thread_id)?;
+    let thread = state.runtime.store().get_thread(&thread_id).await?;
+    if let Some(workspace_id) = query.workspace_id {
+        let workspace_id = WorkspaceId::new(workspace_id);
+        crate::workspace::deny_cross_workspace(&workspace_id, &thread.workspace_id, "thread")?;
+    }
+    let events = state.runtime.store().events_after(&thread_id, 0).await?;
+    let graph = query_topology(
+        project_topology(&thread.workspace_id, &events),
+        TopologyQuery {
+            depth: query.depth.unwrap_or(2),
+            max_nodes: query.max_nodes.unwrap_or(32),
+            include_stale: query.include_stale.unwrap_or(false),
+        },
+    );
+    Ok(Json(graph))
+}
+
+#[derive(Default, Deserialize)]
+struct TopologyApiQuery {
+    workspace_id: Option<String>,
+    depth: Option<usize>,
+    max_nodes: Option<usize>,
+    include_stale: Option<bool>,
+}
+
 async fn get_evidence(
     State(state): State<ServerState>,
     Path((thread_id, evidence_id)): Path<(String, String)>,
+    Query(query): Query<ScopeQuery>,
 ) -> ApiResult<impl IntoResponse> {
     let thread_id = parse_id::<ThreadId>("thread", &thread_id)?;
     let evidence_id = parse_id::<EvidenceId>("evidence", &evidence_id)?;
-    let evidence = state
-        .runtime
-        .store()
-        .get_evidence(&thread_id, &evidence_id)
-        .await?;
+    let evidence = if let Some(workspace_id) = query.workspace_id {
+        state
+            .runtime
+            .store()
+            .get_evidence_in(&WorkspaceId::new(workspace_id), &thread_id, &evidence_id)
+            .await?
+    } else {
+        state
+            .runtime
+            .store()
+            .get_evidence(&thread_id, &evidence_id)
+            .await?
+    };
     Ok(Json(evidence))
+}
+
+#[derive(Default, Deserialize)]
+struct ScopeQuery {
+    workspace_id: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct ArtifactQuery {
     #[serde(default = "default_artifact_bytes")]
     max_bytes: usize,
+    #[serde(default)]
+    workspace_id: Option<String>,
 }
 
 const fn default_artifact_bytes() -> usize {
@@ -295,10 +376,13 @@ async fn get_artifact(
     Path(sha256): Path<String>,
     Query(query): Query<ArtifactQuery>,
 ) -> ApiResult<impl IntoResponse> {
+    let workspace_id = query
+        .workspace_id
+        .unwrap_or_else(|| WorkspaceId::default().as_str().to_owned());
     let bytes = state
         .runtime
         .artifacts()
-        .get(&sha256, query.max_bytes)
+        .get_in(&workspace_id, &sha256, query.max_bytes)
         .await?;
     Ok(([(header::CONTENT_TYPE, "application/octet-stream")], bytes))
 }
@@ -359,6 +443,11 @@ impl From<OpsCodexError> for ApiError {
                 Self::conflict("thread already has an active turn")
             }
             OpsCodexError::Protocol(message) => Self::bad_request(message),
+            OpsCodexError::Policy(message) => Self {
+                status: StatusCode::FORBIDDEN,
+                code: "forbidden",
+                message,
+            },
             other => Self {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
                 code: "internal_error",

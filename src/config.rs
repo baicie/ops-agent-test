@@ -15,6 +15,7 @@ pub struct Config {
     pub targets: TargetConfig,
     pub tools: ToolsConfig,
     pub server: ServerConfig,
+    pub workspaces: Vec<WorkspaceConfigEntry>,
 }
 
 impl Config {
@@ -123,6 +124,23 @@ impl Config {
             return Err(crate::OpsCodexError::Protocol(
                 "loki.max_lines must be greater than zero".into(),
             ));
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for workspace in &self.workspaces {
+            crate::runtime::WorkspaceId::new(workspace.id.trim()).validate()?;
+            if !seen.insert(workspace.id.trim().to_owned()) {
+                return Err(OpsCodexError::Protocol(format!(
+                    "duplicate workspace id `{}`",
+                    workspace.id
+                )));
+            }
+            if let Some(turns) = workspace.max_concurrent_turns
+                && turns == 0
+            {
+                return Err(OpsCodexError::Protocol(
+                    "workspace.max_concurrent_turns must be greater than zero".into(),
+                ));
+            }
         }
         Ok(())
     }
@@ -278,4 +296,25 @@ impl Default for ServerConfig {
             port: 3000,
         }
     }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkspaceConfigEntry {
+    pub id: String,
+    pub display_name: Option<String>,
+    pub environment: Option<String>,
+    pub prometheus_url: Option<String>,
+    pub loki_url: Option<String>,
+    pub loki_tenant_env: Option<String>,
+    pub tempo_url: Option<String>,
+    pub allowed_hosts: Option<Vec<String>>,
+    pub allowed_containers: Option<Vec<String>>,
+    pub kubeconfig_env: Option<String>,
+    pub kube_context: Option<String>,
+    pub cluster_alias: Option<String>,
+    pub allowed_namespaces: Option<Vec<String>>,
+    pub allowed_kinds: Option<Vec<String>>,
+    pub runbook_dir: Option<String>,
+    pub max_concurrent_turns: Option<usize>,
 }

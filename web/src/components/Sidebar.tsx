@@ -1,6 +1,6 @@
 import { MessageSquareText, Plus, Radio } from "lucide-react";
 
-import type { ThreadSummary } from "../types";
+import type { ThreadSummary, WorkspaceSummary } from "../types";
 import { cn } from "../lib/utils";
 import { Brand } from "./Brand";
 import { Button } from "./ui/button";
@@ -9,9 +9,12 @@ import { Separator } from "./ui/separator";
 
 interface SidebarProps {
   threads: ThreadSummary[];
+  workspaces: WorkspaceSummary[];
+  selectedWorkspaceId: string;
   activeThreadId: string | null;
   loading: boolean;
   onSelect: (threadId: string) => void;
+  onWorkspaceChange: (workspaceId: string) => void;
   onNew: () => void;
 }
 
@@ -38,9 +41,12 @@ function statusColor(status: string) {
 
 export function Sidebar({
   threads,
+  workspaces,
+  selectedWorkspaceId,
   activeThreadId,
   loading,
   onSelect,
+  onWorkspaceChange,
   onNew,
 }: SidebarProps) {
   return (
@@ -48,7 +54,36 @@ export function Sidebar({
       <div className="flex h-16 shrink-0 items-center px-5">
         <Brand />
       </div>
-      <div className="px-3 pb-3">
+      <div className="space-y-2 px-3 pb-3">
+        <label className="block px-1 text-[11px] font-semibold uppercase text-zinc-500">
+          Workspace
+          <select
+            aria-label="Workspace"
+            className="mt-1 h-9 w-full rounded-md border border-zinc-200 bg-white px-2 text-[13px] text-zinc-800 shadow-sm"
+            value={selectedWorkspaceId}
+            onChange={(event) => {
+              const next = event.target.value;
+              if (next !== selectedWorkspaceId) onWorkspaceChange(next);
+            }}
+          >
+            {(workspaces.length > 0
+              ? workspaces
+              : [{
+                  id: selectedWorkspaceId || "default",
+                  displayName: selectedWorkspaceId || "default",
+                  environment: "local",
+                  connectors: [],
+                }]
+            ).map((workspace) => (
+              <option key={workspace.id} value={workspace.id}>
+                {workspace.displayName}
+              </option>
+            ))}
+          </select>
+        </label>
+        <p className="px-1 text-[11px] leading-4 text-zinc-500">
+          New threads bind to this workspace and cannot switch later.
+        </p>
         <Button className="w-full justify-start" onClick={onNew}>
           <Plus aria-hidden="true" className="h-4 w-4" />
           New thread
@@ -90,7 +125,7 @@ export function Sidebar({
                 <span className="min-w-0 flex-1">
                   <span className="block truncate text-[13px] font-medium">{threadTitle(thread)}</span>
                   <span className="mt-0.5 block truncate text-[11px] text-zinc-500">
-                    {thread.status === "running" ? "Investigating" : "Thread"}
+                    {thread.workspaceId || selectedWorkspaceId}
                   </span>
                 </span>
                 {when && <span className="shrink-0 text-[10px] text-zinc-400">{when}</span>}

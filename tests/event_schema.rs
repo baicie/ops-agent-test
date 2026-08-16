@@ -1,4 +1,6 @@
-use opscodex::runtime::{EVENT_SCHEMA_VERSION, EventEnvelope, RuntimeEvent, ThreadId, TurnId};
+use opscodex::runtime::{
+    EVENT_SCHEMA_VERSION, EventEnvelope, RuntimeEvent, ThreadId, TurnId, WorkspaceId,
+};
 use serde_json::{Value, json};
 
 #[test]
@@ -100,7 +102,10 @@ async fn v1_tool_started_still_pairs_in_model_history() {
     let directory = tempdir().unwrap();
     let store = JsonlStore::new(directory.path()).await.unwrap();
     let thread_id = ThreadId::new();
-    store.create_thread(thread_id.clone()).await.unwrap();
+    store
+        .create_thread(thread_id.clone(), WorkspaceId::default())
+        .await
+        .unwrap();
     let path = directory.path().join(format!("{thread_id}.jsonl"));
     let v1_call = json!({
         "seq": 2,

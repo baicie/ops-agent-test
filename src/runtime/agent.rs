@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -20,10 +20,11 @@ use crate::{
     runtime::{ContextBudget, EventId, TurnInput},
     store::{AppendEvent, EventStore},
     telemetry::RuntimeMetrics,
-    tools::{ToolOutput, ToolRegistry},
+    tools::{ToolInvocation, ToolOutput, ToolRegistry},
+    workspace::WorkspaceCatalog,
 };
 
-use super::{EventEnvelope, EvidenceMeta, RuntimeEvent, ThreadId, TurnId};
+use super::{EventEnvelope, EvidenceMeta, RuntimeEvent, ThreadId, TurnId, WorkspaceId};
 
 pub const SYSTEM_INSTRUCTIONS: &str = r#"You are OpsCodex, an autonomous AIOps diagnostic agent.
 
@@ -38,6 +39,7 @@ Rules:
 6. If evidence is insufficient, abstain and say what is missing.
 7. Incident context is unverified. Confirm every statement with tools.
 8. Keep investigating until you can provide a useful diagnosis or a clear abstain.
+9. Stay inside the current Workspace. Kubernetes, topology and runbook tools are read-only references.
 
 Successful tool results include an evidence_id. Final answers MUST be a JSON object:
 {
@@ -108,6 +110,8 @@ impl From<&RuntimeSettings> for RuntimeConfig {
 pub struct AgentRuntime {
     model: Arc<dyn ModelProvider>,
     tools: ToolRegistry,
+    workspaces: Arc<WorkspaceCatalog>,
+    workspace_tools: Arc<HashMap<String, ToolRegistry>>,
     policy: PolicyEngine,
     store: Arc<dyn EventStore>,
     artifacts: Arc<ArtifactStore>,
@@ -128,6 +132,8 @@ impl AgentRuntime {
         Self {
             model,
             tools,
+            workspaces: Arc::new(WorkspaceCatalog::default()),
+            workspace_tools: Arc::new(HashMap::new()),
             policy,
             store,
             artifacts: Arc::new(ArtifactStore::memory()),
@@ -138,6 +144,16 @@ impl AgentRuntime {
         }
     }
 
+    pub fn with_workspaces(
+        mut self,
+        catalog: WorkspaceCatalog,
+        tools: HashMap<String, ToolRegistry>,
+    ) -> Self {
+        self.workspaces = Arc::new(catalog);
+        self.workspace_tools = Arc::new(tools);
+        self
+    }
+
     pub fn with_artifacts(mut self, artifacts: Arc<ArtifactStore>) -> Self {
         self.artifacts = artifacts;
         self
@@ -146,6 +162,10 @@ impl AgentRuntime {
     pub fn with_metrics(mut self, metrics: Arc<RuntimeMetrics>) -> Self {
         self.metrics = metrics;
         self
+    }
+
+    pub fn workspaces(&self) -> Arc<WorkspaceCatalog> {
+        self.workspaces.clone()
     }
 
     pub fn store(&self) -> Arc<dyn EventStore> {
@@ -162,6 +182,18 @@ impl AgentRuntime {
 
     pub fn policy(&self) -> &PolicyEngine {
         &self.policy
+    }
+
+    fn tools_for(&self, workspace: &WorkspaceId) -> Result<&ToolRegistry> {
+        if self.workspace_tools.is_empty() {
+            return Ok(&self.tools);
+        }
+        self.workspace_tools.get(workspace.as_str()).ok_or_else(|| {
+            OpsCodexError::Policy(format!(
+                "workspace `{}` is not configured",
+                workspace.as_str()
+            ))
+        })
     }
 
     pub async fn run_turn(
@@ -235,6 +267,12 @@ impl AgentRuntime {
         events: &broadcast::Sender<EventEnvelope>,
         cancellation: CancellationToken,
     ) -> Result<()> {
+        let thread = self.store.get_thread(thread_id).await?;
+        let workspace_id = thread.workspace_id;
+        if !self.workspaces.is_empty() {
+            self.workspaces.require(&workspace_id)?;
+        }
+        let tools = self.tools_for(&workspace_id)?.clone();
         self.emit(
             thread_id,
             Some(turn_id.clone()),
@@ -263,7 +301,7 @@ impl AgentRuntime {
                     .store
                     .model_context(thread_id, &self.config.context)
                     .await?,
-                tools: self.tools.schemas(),
+                tools: tools.schemas(),
             };
             let (response, streamed, model_event_id) = self
                 .complete_model(
@@ -323,6 +361,8 @@ impl AgentRuntime {
                         let context = TurnEventContext {
                             thread_id,
                             turn_id,
+                            workspace_id: &workspace_id,
+                            tools: &tools,
                             events,
                             causation_id: last_event_id.clone(),
                         };
@@ -454,7 +494,7 @@ impl AgentRuntime {
             .await?;
         let mut causation = Some(proposed.event_id.clone());
 
-        let risk = match self.tools.risk(&name) {
+        let risk = match context.tools.risk(&name) {
             Ok(risk) => risk,
             Err(error) => {
                 return self
@@ -593,9 +633,16 @@ impl AgentRuntime {
 
         let started = Instant::now();
         let tool_cancel = cancellation.child_token();
-        let execution = self
-            .tools
-            .execute(&name, arguments.clone(), tool_cancel.clone());
+        let execution = context.tools.execute_with_context(
+            &name,
+            arguments.clone(),
+            ToolInvocation {
+                cancellation: tool_cancel.clone(),
+                workspace_id: context.workspace_id.clone(),
+                thread_id: context.thread_id.clone(),
+                store: Some(self.store.clone()),
+            },
+        );
         let result = tokio::select! {
             _ = cancellation.cancelled() => {
                 tool_cancel.cancel();
@@ -683,7 +730,11 @@ impl AgentRuntime {
         if success {
             let bytes = serde_json::to_vec(&content).unwrap_or_default();
             let artifact_ref = if bytes.len() > self.config.inline_artifact_bytes {
-                Some(self.artifacts.put(&bytes).await?)
+                Some(
+                    self.artifacts
+                        .put_in(context.workspace_id.as_str(), &bytes)
+                        .await?,
+                )
             } else {
                 None
             };
@@ -692,7 +743,7 @@ impl AgentRuntime {
                 &content,
                 artifact_ref,
                 &EvidenceIds {
-                    workspace_id: crate::runtime::WorkspaceId::default(),
+                    workspace_id: context.workspace_id.clone(),
                     thread_id: context.thread_id.clone(),
                     turn_id: context.turn_id.clone(),
                     tool_call_id: call_id.clone(),
@@ -771,6 +822,8 @@ fn finalize_turn_diagnosis(
 struct TurnEventContext<'a> {
     thread_id: &'a ThreadId,
     turn_id: &'a TurnId,
+    workspace_id: &'a WorkspaceId,
+    tools: &'a ToolRegistry,
     events: &'a broadcast::Sender<EventEnvelope>,
     causation_id: Option<EventId>,
 }

@@ -9,7 +9,7 @@ import { Sidebar } from "./components/Sidebar";
 import { Button } from "./components/ui/button";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { initialState, opsReducer } from "./reducer";
-import type { IncidentContext } from "./types";
+import type { IncidentContext, TopologyGraph, WorkspaceSummary } from "./types";
 
 interface AppProps {
   client?: OpsApiClient;
@@ -28,20 +28,33 @@ export default function App({ client = defaultApi }: AppProps) {
   const [creatingThread, setCreatingThread] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [resolvingApprovals, setResolvingApprovals] = useState<Set<string>>(() => new Set());
+  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
+  const [selectedWorkspaceId, setSelectedWorkspaceId] = useState("default");
+  const [topology, setTopology] = useState<TopologyGraph | null>(null);
 
   useEffect(() => {
     let active = true;
     dispatch({ type: "threads/loading" });
-    void client
-      .listThreads()
-      .then((threads) => {
+    void (async () => {
+      try {
+        const listed = await client.listWorkspaces();
+        if (!active) return;
+        const nextWorkspaces =
+          listed.length > 0
+            ? listed
+            : [{ id: "default", displayName: "Local demo", environment: "local", connectors: [] }];
+        setWorkspaces(nextWorkspaces);
+        const selected =
+          nextWorkspaces.find((workspace) => workspace.id === "default")?.id ?? nextWorkspaces[0].id;
+        setSelectedWorkspaceId(selected);
+        const threads = await client.listThreads(selected);
         if (!active) return;
         dispatch({ type: "threads/loaded", payload: threads });
         if (threads.length > 0) dispatch({ type: "thread/select", payload: threads[0].id });
-      })
-      .catch((error: unknown) => {
+      } catch (error: unknown) {
         if (active) dispatch({ type: "threads/failed", payload: readableError(error) });
-      });
+      }
+    })();
     return () => {
       active = false;
     };
@@ -92,22 +105,64 @@ export default function App({ client = defaultApi }: AppProps) {
     () => state.threads.find((thread) => thread.id === state.activeThreadId),
     [state.activeThreadId, state.threads],
   );
+  const topologyWorkspaceId = activeThread?.workspaceId ?? selectedWorkspaceId;
+
+  useEffect(() => {
+    if (!state.activeThreadId) {
+      setTopology(null);
+      return;
+    }
+    const threadId = state.activeThreadId;
+    let active = true;
+    void client
+      .getTopology(threadId, topologyWorkspaceId ?? undefined)
+      .then((graph) => {
+        if (active) setTopology(graph.nodes.length > 0 ? graph : null);
+      })
+      .catch(() => {
+        if (active) setTopology(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [client, state.activeThreadId, state.lastSeq, topologyWorkspaceId]);
 
   const createThread = useCallback(async () => {
     if (creatingThread) return;
     setCreatingThread(true);
     try {
-      const created = await client.createThread();
+      const created = await client.createThread(selectedWorkspaceId);
       dispatch({
         type: "thread/created",
-        payload: { id: created.id, status: "idle", title: null },
+        payload: {
+          id: created.id,
+          status: "idle",
+          title: null,
+          workspaceId: created.workspaceId,
+        },
       });
     } catch (error) {
       dispatch({ type: "error/set", payload: readableError(error) });
     } finally {
       setCreatingThread(false);
     }
-  }, [client, creatingThread]);
+  }, [client, creatingThread, selectedWorkspaceId]);
+
+  const selectWorkspace = useCallback(
+    async (workspaceId: string) => {
+      if (workspaceId === selectedWorkspaceId) return;
+      setSelectedWorkspaceId(workspaceId);
+      dispatch({ type: "threads/loading" });
+      try {
+        const threads = await client.listThreads(workspaceId);
+        dispatch({ type: "threads/loaded", payload: threads });
+        dispatch({ type: "thread/select", payload: threads[0]?.id ?? null });
+      } catch (error) {
+        dispatch({ type: "threads/failed", payload: readableError(error) });
+      }
+    },
+    [client, selectedWorkspaceId],
+  );
 
   const sendMessage = useCallback(
     async (input: string, incidentContext?: IncidentContext) => {
@@ -158,12 +213,21 @@ export default function App({ client = defaultApi }: AppProps) {
     [client],
   );
 
+  const workspaceLabel = useMemo(() => {
+    const workspaceId = activeThread?.workspaceId ?? selectedWorkspaceId;
+    const workspace = workspaces.find((item) => item.id === workspaceId);
+    return workspace?.displayName ?? workspaceId;
+  }, [activeThread?.workspaceId, selectedWorkspaceId, workspaces]);
+
   const sidebar = (
     <Sidebar
       threads={state.threads}
+      workspaces={workspaces}
+      selectedWorkspaceId={selectedWorkspaceId}
       activeThreadId={state.activeThreadId}
       loading={state.loadStatus === "loading" && state.threads.length === 0}
       onSelect={(threadId) => dispatch({ type: "thread/select", payload: threadId })}
+      onWorkspaceChange={(workspaceId) => void selectWorkspace(workspaceId)}
       onNew={() => void createThread()}
     />
   );
@@ -199,12 +263,14 @@ export default function App({ client = defaultApi }: AppProps) {
         <main className="flex min-w-0 flex-1 flex-col">
           <Header
             title={activeThread?.title?.trim() || (activeThread ? "Untitled investigation" : "OpsCodex")}
+            workspaceLabel={activeThread ? workspaceLabel : null}
             connectionStatus={state.connectionStatus}
             turnStatus={state.turnStatus}
             onOpenSidebar={() => dispatch({ type: "sidebar/set", payload: true })}
           />
           <Chat
             state={state}
+            topology={topology}
             hasThread={Boolean(state.activeThreadId)}
             stopping={stopping}
             resolvingApprovals={resolvingApprovals}

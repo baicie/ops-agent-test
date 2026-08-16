@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use opscodex::{
     model::ModelItem,
-    runtime::{EvidenceMeta, RuntimeEvent, ThreadId, TurnId},
+    runtime::{EvidenceMeta, RuntimeEvent, ThreadId, TurnId, WorkspaceId},
     store::JsonlStore,
 };
 use serde_json::json;
@@ -17,7 +17,10 @@ async fn concurrent_appends_have_monotonic_per_thread_sequences() {
     let directory = tempdir().unwrap();
     let store = Arc::new(JsonlStore::new(directory.path()).await.unwrap());
     let thread_id = ThreadId::new();
-    store.create_thread(thread_id.clone()).await.unwrap();
+    store
+        .create_thread(thread_id.clone(), WorkspaceId::default())
+        .await
+        .unwrap();
 
     let mut tasks = Vec::new();
     for index in 0..16 {
@@ -49,7 +52,10 @@ async fn history_uses_completed_items_and_ignores_streaming_deltas() {
     let store = JsonlStore::new(directory.path()).await.unwrap();
     let thread_id = ThreadId::new();
     let turn_id = TurnId::new();
-    store.create_thread(thread_id.clone()).await.unwrap();
+    store
+        .create_thread(thread_id.clone(), WorkspaceId::default())
+        .await
+        .unwrap();
 
     let events = [
         RuntimeEvent::user_message("What happened?"),
@@ -91,7 +97,10 @@ async fn history_limit_keeps_function_call_and_output_together() {
     let store = JsonlStore::new(directory.path()).await.unwrap();
     let thread_id = ThreadId::new();
     let turn_id = TurnId::new();
-    store.create_thread(thread_id.clone()).await.unwrap();
+    store
+        .create_thread(thread_id.clone(), WorkspaceId::default())
+        .await
+        .unwrap();
 
     for event in [
         RuntimeEvent::user_message("check service"),
@@ -131,7 +140,10 @@ async fn history_drops_unmatched_tool_items_from_interrupted_turns() {
     let store = JsonlStore::new(directory.path()).await.unwrap();
     let thread_id = ThreadId::new();
     let turn_id = TurnId::new();
-    store.create_thread(thread_id.clone()).await.unwrap();
+    store
+        .create_thread(thread_id.clone(), WorkspaceId::default())
+        .await
+        .unwrap();
 
     for event in [
         RuntimeEvent::user_message("diagnose"),
@@ -166,7 +178,10 @@ async fn replay_ignores_a_partial_tail_but_rejects_a_bad_completed_line() {
     let directory = tempdir().unwrap();
     let store = JsonlStore::new(directory.path()).await.unwrap();
     let thread_id = ThreadId::new();
-    store.create_thread(thread_id.clone()).await.unwrap();
+    store
+        .create_thread(thread_id.clone(), WorkspaceId::default())
+        .await
+        .unwrap();
     let path = directory.path().join(format!("{thread_id}.jsonl"));
 
     use tokio::io::AsyncWriteExt;
@@ -185,7 +200,10 @@ async fn replay_ignores_a_partial_tail_but_rejects_a_bad_completed_line() {
     assert_eq!(events.len(), 1);
 
     let malformed_thread = ThreadId::new();
-    store.create_thread(malformed_thread.clone()).await.unwrap();
+    store
+        .create_thread(malformed_thread.clone(), WorkspaceId::default())
+        .await
+        .unwrap();
     let malformed_path = directory.path().join(format!("{malformed_thread}.jsonl"));
     let mut file = tokio::fs::OpenOptions::new()
         .append(true)
@@ -204,7 +222,10 @@ async fn append_recovers_from_a_partial_tail_without_reusing_a_sequence() {
     let directory = tempdir().unwrap();
     let store = JsonlStore::new(directory.path()).await.unwrap();
     let thread_id = ThreadId::new();
-    store.create_thread(thread_id.clone()).await.unwrap();
+    store
+        .create_thread(thread_id.clone(), WorkspaceId::default())
+        .await
+        .unwrap();
     let path = directory.path().join(format!("{thread_id}.jsonl"));
 
     use tokio::io::AsyncWriteExt;
@@ -237,7 +258,10 @@ async fn thread_summaries_reconstruct_title_and_current_status() {
     let store = JsonlStore::new(directory.path()).await.unwrap();
     let thread_id = ThreadId::new();
     let turn_id = TurnId::new();
-    store.create_thread(thread_id.clone()).await.unwrap();
+    store
+        .create_thread(thread_id.clone(), WorkspaceId::default())
+        .await
+        .unwrap();
     store
         .append(
             &thread_id,

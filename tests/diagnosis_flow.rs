@@ -3,7 +3,7 @@ use std::sync::Arc;
 use opscodex::{
     model::{FakeModelProvider, ModelOutput, ModelResponse},
     policy::{ApprovalBroker, PolicyEngine},
-    runtime::{AgentRuntime, RuntimeConfig, RuntimeEvent, ThreadId, TurnId},
+    runtime::{AgentRuntime, RuntimeConfig, RuntimeEvent, ThreadId, TurnId, WorkspaceId},
     store::JsonlStore,
     tools::{FakeTool, ToolRegistry},
 };
@@ -44,7 +44,9 @@ async fn multi_source_incident_flow_reinjects_evidence_until_diagnosis() -> anyh
     let directory = tempdir()?;
     let store = Arc::new(JsonlStore::new(directory.path().join("threads")).await?);
     let thread_id = ThreadId::new();
-    store.create_thread(thread_id.clone()).await?;
+    store
+        .create_thread(thread_id.clone(), WorkspaceId::default())
+        .await?;
     let runtime = AgentRuntime::new(
         model.clone(),
         tools,
