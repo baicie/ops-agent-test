@@ -1,4 +1,5 @@
 import type {
+  IncidentContext,
   NormalizedEvent,
   RuntimeEventType,
   ThreadDetail,
@@ -12,6 +13,9 @@ const EVENT_TYPES: RuntimeEventType[] = [
   "assistant_delta",
   "assistant_completed",
   "tool_started",
+  "tool_proposed",
+  "tool_authorized",
+  "tool_execution_started",
   "tool_completed",
   "approval_required",
   "approval_resolved",
@@ -43,7 +47,7 @@ export interface OpsApiClient {
   listThreads(): Promise<ThreadSummary[]>;
   createThread(): Promise<{ id: string }>;
   getThread(threadId: string): Promise<ThreadDetail>;
-  startTurn(threadId: string, input: string): Promise<{ turnId: string; status: string }>;
+  startTurn(threadId: string, input: string, incidentContext?: IncidentContext | null): Promise<{ turnId: string; status: string }>;
   interruptTurn(turnId: string): Promise<void>;
   resolveApproval(approvalId: string, approved: boolean): Promise<void>;
   subscribe(
@@ -85,9 +89,8 @@ function asNumber(value: unknown): number | undefined {
 
 function runtimeEventType(value: unknown, fallback?: string): RuntimeEventType {
   const candidate = asString(value) ?? fallback;
-  if (!candidate || !EVENT_TYPE_SET.has(candidate)) {
-    throw new Error(`Unsupported runtime event: ${candidate ?? "unknown"}`);
-  }
+  if (!candidate) return "unknown";
+  if (!EVENT_TYPE_SET.has(candidate)) return "unknown";
   return candidate as RuntimeEventType;
 }
 
@@ -99,10 +102,9 @@ export function normalizeEventEnvelope(
   const envelope = asRecord(value);
   const nested = asRecord(envelope.event);
   const hasNestedEvent = Object.keys(nested).length > 0;
-  const type = runtimeEventType(
-    hasNestedEvent ? nested.type : envelope.type,
-    eventName === "message" ? undefined : eventName,
-  );
+  const rawType = asString(hasNestedEvent ? nested.type : envelope.type)
+    ?? (eventName === "message" ? undefined : eventName);
+  const type = runtimeEventType(rawType);
   const data = hasNestedEvent ? { ...nested } : { ...envelope };
   delete data.type;
   if (!hasNestedEvent) {
@@ -112,6 +114,9 @@ export function normalizeEventEnvelope(
     delete data.turn_id;
     delete data.turnId;
     delete data.timestamp;
+  }
+  if (type === "unknown" && rawType) {
+    data._event_type = rawType;
   }
 
   return {
@@ -204,11 +209,14 @@ export function createApiClient(
       };
     },
 
-    async startTurn(threadId, input) {
+    async startTurn(threadId, input, incidentContext) {
       const body = asRecord(
         await request<unknown>(apiUrl(`/api/threads/${encodeURIComponent(threadId)}/turns`), {
           method: "POST",
-          body: JSON.stringify({ input }),
+          body: JSON.stringify({
+            input,
+            ...(incidentContext ? { incident_context: incidentContext } : {}),
+          }),
         }),
       );
       const turnId = asString(body.turn_id) ?? asString(body.turnId);

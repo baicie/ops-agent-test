@@ -97,7 +97,7 @@ describe("OpsCodex app", () => {
     await user.type(composer, "order-service 怎么了？");
     await user.click(screen.getByRole("button", { name: "Send message" }));
 
-    expect(client.startTurn).toHaveBeenCalledWith("thread-new", "order-service 怎么了？");
+    expect(client.startTurn).toHaveBeenCalledWith("thread-new", "order-service 怎么了？", undefined);
     expect(screen.getAllByText("order-service 怎么了？").length).toBeGreaterThan(0);
 
     const stop = await screen.findByRole("button", { name: /stop/i });
@@ -126,5 +126,90 @@ describe("OpsCodex app", () => {
 
     await waitFor(() => expect(client.resolveApproval).toHaveBeenCalledWith("approval-1", true));
     expect(screen.getByText("Allowed")).toBeInTheDocument();
+  });
+
+  it("shows alert context and locates evidence from a diagnosis claim", async () => {
+    const client = createClient({
+      id: "thread-1",
+      title: "Checkout 5xx",
+      status: "completed",
+      events: [
+        event(1, "user_message", {
+          content: "Investigate checkout 5xx",
+          incident_context: {
+            service: "order-service",
+            environment: "staging",
+            labels: { severity: "critical" },
+          },
+        }),
+        event(2, "tool_proposed", {
+          tool_call_id: "call-1",
+          tool: "log_query",
+          arguments: { query: '{service="order-service"}' },
+        }),
+        event(3, "tool_completed", {
+          tool_call_id: "call-1",
+          tool: "log_query",
+          duration_ms: 12,
+          success: true,
+          output: { status: "success" },
+          evidence: {
+            source: "loki",
+            evidence_id: "ev-pool-1",
+            query: '{service="order-service"}',
+            summary: "database pool exhausted",
+            sha256: "abc123def456",
+          },
+        }),
+        event(4, "assistant_completed", {
+          content: "Pool exhaustion caused the 5xx spike.",
+          diagnosis: {
+            summary: "Pool exhaustion caused the 5xx spike.",
+            claims: [
+              {
+                kind: "observed",
+                statement: "Logs show database pool exhausted.",
+                evidence_ids: ["ev-pool-1"],
+                confidence: "high",
+              },
+            ],
+            limitations: ["Traces were not queried."],
+            recommended_actions: ["Raise the pool cap."],
+          },
+        }),
+      ],
+    });
+
+    render(<App client={client} />);
+
+    expect(await screen.findByText("Investigate checkout 5xx")).toBeInTheDocument();
+    expect(screen.getAllByText("Alert context").length).toBeGreaterThan(0);
+    expect(screen.getByText("order-service")).toBeInTheDocument();
+    expect(screen.getByText("Investigation hint only. It is not verified evidence.")).toBeInTheDocument();
+    expect(screen.getByText("Logs show database pool exhausted.")).toBeInTheDocument();
+    expect(screen.getByText("Traces were not queried.")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Evidence ev-pool-1" }));
+    expect(document.getElementById("evidence-ev-pool-1")).toBeTruthy();
+    expect(await screen.findByText("database pool exhausted")).toBeInTheDocument();
+  });
+
+  it("sends optional alert context with a new turn", async () => {
+    const client = createClient();
+    const user = userEvent.setup();
+    render(<App client={client} />);
+
+    await screen.findByText("No investigations yet");
+    await user.click(screen.getByRole("button", { name: /new thread/i }));
+    await user.click(await screen.findByRole("button", { name: /alert context/i }));
+    await user.type(screen.getByLabelText("Alert service"), "order-service");
+    await user.type(screen.getByLabelText("Alert environment"), "staging");
+    await user.type(screen.getByPlaceholderText("Ask about your infrastructure..."), "why 5xx?");
+    await user.click(screen.getByRole("button", { name: "Send message" }));
+
+    expect(client.startTurn).toHaveBeenCalledWith("thread-new", "why 5xx?", {
+      service: "order-service",
+      environment: "staging",
+    });
   });
 });

@@ -1,10 +1,21 @@
 import { Bot, UserRound } from "lucide-react";
 
-import type { MessageItem } from "../types";
+import type { Diagnosis, MessageItem } from "../types";
 import { cn } from "../lib/utils";
+import { AlertContext } from "./AlertContext";
+import { DiagnosisView } from "./Diagnosis";
 
-export function Message({ item }: { item: MessageItem }) {
+export function Message({
+  item,
+  selectedEvidenceId,
+  onSelectEvidence,
+}: {
+  item: MessageItem;
+  selectedEvidenceId?: string | null;
+  onSelectEvidence?: (evidenceId: string) => void;
+}) {
   const assistant = item.role === "assistant";
+  const diagnosis = item.diagnosis as Diagnosis | null | undefined;
 
   return (
     <article className={cn("flex gap-3 sm:gap-4", !assistant && "justify-end")}>
@@ -31,6 +42,14 @@ export function Message({ item }: { item: MessageItem }) {
             <span aria-label="Streaming" className="stream-cursor ml-0.5 inline-block h-4 w-0.5 translate-y-0.5 bg-emerald-500" />
           )}
         </div>
+        {item.incidentContext && <AlertContext context={item.incidentContext} />}
+        {diagnosis && (
+          <DiagnosisView
+            diagnosis={diagnosis}
+            selectedEvidenceId={selectedEvidenceId}
+            onSelectEvidence={onSelectEvidence}
+          />
+        )}
       </div>
       {!assistant && (
         <span className="mt-0.5 hidden h-8 w-8 shrink-0 items-center justify-center rounded-md bg-zinc-200 text-zinc-600 sm:flex">

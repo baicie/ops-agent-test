@@ -186,4 +186,40 @@ describe("OpsCodex API client", () => {
     subscription.close();
     expect(FakeEventSource.instance.closed).toBe(true);
   });
+
+  it("keeps unknown event types as a compatible unknown envelope", () => {
+    const event = normalizeEventEnvelope({
+      seq: 40,
+      thread_id: "thread-1",
+      turn_id: "turn-1",
+      event: { type: "future_checkpoint", checkpoint_id: "cp-1" },
+    });
+
+    expect(event).toMatchObject({
+      seq: 40,
+      type: "unknown",
+      data: { checkpoint_id: "cp-1", _event_type: "future_checkpoint" },
+    });
+  });
+
+  it("posts incident context with a turn", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ turn_id: "turn-1", status: "running" }));
+
+    const api = createApiClient("");
+    await api.startTurn("thread-1", "Investigate 5xx", {
+      service: "order-service",
+      environment: "staging",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/threads/thread-1/turns",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          input: "Investigate 5xx",
+          incident_context: { service: "order-service", environment: "staging" },
+        }),
+      }),
+    );
+  });
 });

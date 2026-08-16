@@ -1,9 +1,4 @@
-use std::{
-    collections::{HashMap, VecDeque},
-    path::PathBuf,
-    str::FromStr,
-    sync::Arc,
-};
+use std::{path::PathBuf, str::FromStr, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -15,8 +10,13 @@ use tokio::{
 
 use crate::{
     OpsCodexError, Result,
+    evidence::EvidenceMeta,
     model::ModelItem,
-    runtime::{EventEnvelope, Item, RuntimeEvent, Thread, ThreadId, ThreadStatus, TurnId},
+    runtime::{
+        ContextBudget, EventEnvelope, EvidenceId, Item, RuntimeEvent, Thread, ThreadId,
+        ThreadStatus, TurnId,
+    },
+    store::{AppendEvent, EventStore},
 };
 
 #[derive(Clone)]
@@ -56,13 +56,7 @@ impl JsonlStore {
     pub async fn create_thread(&self, thread_id: ThreadId) -> Result<EventEnvelope> {
         let _guard = self.mutation_lock.lock().await;
         let path = self.thread_path(&thread_id);
-        let envelope = EventEnvelope {
-            seq: 1,
-            thread_id,
-            turn_id: None,
-            timestamp: Utc::now(),
-            event: RuntimeEvent::ThreadCreated,
-        };
+        let envelope = EventEnvelope::new(1, thread_id, None, RuntimeEvent::ThreadCreated);
         let line = encode_line(&envelope)?;
         let mut file = OpenOptions::new()
             .create_new(true)
@@ -96,7 +90,13 @@ impl JsonlStore {
         turn_id: Option<TurnId>,
         event: RuntimeEvent,
     ) -> Result<EventEnvelope> {
+        self.append_event(AppendEvent::new(thread_id.clone(), turn_id, event))
+            .await
+    }
+
+    pub async fn append_event(&self, command: AppendEvent) -> Result<EventEnvelope> {
         let _guard = self.mutation_lock.lock().await;
+        let thread_id = &command.thread_id;
         let path = self.thread_path(thread_id);
         let bytes = read_existing(&path, thread_id).await?;
         let parsed = parse_log(&path, thread_id, &bytes)?;
@@ -106,13 +106,17 @@ impl JsonlStore {
             })?,
             None => 1,
         };
-        let envelope = EventEnvelope {
+        let mut envelope = EventEnvelope::with_causation(
             seq,
-            thread_id: thread_id.clone(),
-            turn_id,
-            timestamp: Utc::now(),
-            event,
-        };
+            command.thread_id.clone(),
+            command.turn_id,
+            command.item_id,
+            command.causation_id,
+            command.event,
+        );
+        if let Some(stream_kind) = command.stream_kind {
+            envelope.stream_kind = stream_kind;
+        }
         let mut line = Vec::new();
         match parsed.tail {
             LogTail::Clean => {}
@@ -164,30 +168,54 @@ impl JsonlStore {
         thread_id: &ThreadId,
         limit: usize,
     ) -> Result<Vec<ModelItem>> {
+        self.model_context(thread_id, &ContextBudget::items_only(limit))
+            .await
+    }
+
+    pub async fn model_context(
+        &self,
+        thread_id: &ThreadId,
+        budget: &ContextBudget,
+    ) -> Result<Vec<ModelItem>> {
         let events = self.events_after(thread_id, 0).await?;
-        let history: Vec<_> = events
-            .into_iter()
-            .filter_map(|envelope| match envelope.event {
-                RuntimeEvent::UserMessage { content } => Some(ModelItem::UserMessage { content }),
-                RuntimeEvent::AssistantCompleted { content } => {
-                    Some(ModelItem::AssistantMessage { content })
+        Ok(crate::runtime::build_model_context(
+            model_items_from_events(&events),
+            budget,
+        ))
+    }
+
+    pub async fn last_seq(&self, thread_id: &ThreadId) -> Result<u64> {
+        Ok(self
+            .events_after(thread_id, 0)
+            .await?
+            .last()
+            .map(|envelope| envelope.seq)
+            .unwrap_or(0))
+    }
+
+    pub async fn get_evidence(
+        &self,
+        thread_id: &ThreadId,
+        evidence_id: &EvidenceId,
+    ) -> Result<EvidenceMeta> {
+        let events = self.events_after(thread_id, 0).await?;
+        for envelope in events {
+            if let RuntimeEvent::ToolCompleted {
+                evidence, success, ..
+            } = envelope.event
+            {
+                if !success {
+                    continue;
                 }
-                RuntimeEvent::ToolStarted {
-                    call_id,
-                    tool,
-                    arguments,
-                } => Some(ModelItem::ToolCall {
-                    call_id,
-                    name: tool,
-                    arguments,
-                }),
-                RuntimeEvent::ToolCompleted {
-                    call_id, output, ..
-                } => Some(ModelItem::ToolResult { call_id, output }),
-                _ => None,
-            })
-            .collect();
-        Ok(trim_model_history(history, limit))
+                let id = evidence.evidence_id_or_synthesize(thread_id, envelope.seq);
+                if &id == evidence_id {
+                    let mut evidence = evidence;
+                    evidence.evidence_id = Some(id);
+                    return Ok(evidence);
+                }
+            }
+        }
+        Err(OpsCodexError::NotFound(format!("evidence {evidence_id}")))
     }
 
     pub async fn get_thread(&self, thread_id: &ThreadId) -> Result<Thread> {
@@ -247,92 +275,106 @@ impl JsonlStore {
     }
 }
 
-/// Keep a bounded suffix of model input without emitting an incomplete tool exchange.
-/// Responses API requests require every function call output to have its call in context.
-fn trim_model_history(history: Vec<ModelItem>, limit: usize) -> Vec<ModelItem> {
-    if limit == 0 || history.is_empty() {
-        return Vec::new();
+#[async_trait::async_trait]
+impl EventStore for JsonlStore {
+    async fn create_thread(&self, thread_id: ThreadId) -> Result<EventEnvelope> {
+        JsonlStore::create_thread(self, thread_id).await
     }
 
-    // First remove tool items that do not have a matching counterpart. This also
-    // protects the next request after an interrupted or crashed turn.
-    let mut paired = vec![false; history.len()];
-    let mut pending_calls: HashMap<String, VecDeque<usize>> = HashMap::new();
-    for (index, item) in history.iter().enumerate() {
-        match item {
-            ModelItem::ToolCall { call_id, .. } => {
-                pending_calls
-                    .entry(call_id.clone())
-                    .or_default()
-                    .push_back(index);
-            }
-            ModelItem::ToolResult { call_id, .. } => {
-                let Some(queue) = pending_calls.get_mut(call_id) else {
-                    continue;
+    async fn append(
+        &self,
+        thread_id: &ThreadId,
+        turn_id: Option<TurnId>,
+        event: RuntimeEvent,
+    ) -> Result<EventEnvelope> {
+        JsonlStore::append(self, thread_id, turn_id, event).await
+    }
+
+    async fn append_event(&self, command: AppendEvent) -> Result<EventEnvelope> {
+        JsonlStore::append_event(self, command).await
+    }
+
+    async fn events_after(
+        &self,
+        thread_id: &ThreadId,
+        after_seq: u64,
+    ) -> Result<Vec<EventEnvelope>> {
+        JsonlStore::events_after(self, thread_id, after_seq).await
+    }
+
+    async fn get_thread(&self, thread_id: &ThreadId) -> Result<Thread> {
+        JsonlStore::get_thread(self, thread_id).await
+    }
+
+    async fn list_threads(&self) -> Result<Vec<ThreadSummary>> {
+        JsonlStore::list_threads(self).await
+    }
+
+    async fn last_seq(&self, thread_id: &ThreadId) -> Result<u64> {
+        JsonlStore::last_seq(self, thread_id).await
+    }
+
+    async fn model_history(&self, thread_id: &ThreadId, limit: usize) -> Result<Vec<ModelItem>> {
+        JsonlStore::model_history(self, thread_id, limit).await
+    }
+
+    async fn model_context(
+        &self,
+        thread_id: &ThreadId,
+        budget: &ContextBudget,
+    ) -> Result<Vec<ModelItem>> {
+        JsonlStore::model_context(self, thread_id, budget).await
+    }
+
+    async fn get_evidence(
+        &self,
+        thread_id: &ThreadId,
+        evidence_id: &EvidenceId,
+    ) -> Result<EvidenceMeta> {
+        JsonlStore::get_evidence(self, thread_id, evidence_id).await
+    }
+}
+
+fn model_items_from_events(events: &[EventEnvelope]) -> Vec<ModelItem> {
+    events
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            RuntimeEvent::UserMessage {
+                content,
+                incident_context,
+            } => {
+                let content = match incident_context {
+                    Some(context) => format!("{}\n\n{content}", context.prompt_block()),
+                    None => content.clone(),
                 };
-                let Some(call_index) = queue.pop_front() else {
-                    continue;
-                };
-                paired[call_index] = true;
-                paired[index] = true;
+                Some(ModelItem::UserMessage { content })
             }
-            _ => {}
-        }
-    }
-
-    let mut valid = Vec::with_capacity(history.len());
-    for (index, item) in history.into_iter().enumerate() {
-        if paired[index]
-            || !matches!(
-                &item,
-                ModelItem::ToolCall { .. } | ModelItem::ToolResult { .. }
-            )
-        {
-            valid.push(item);
-        }
-    }
-    if valid.len() <= limit {
-        return valid;
-    }
-
-    // The raw suffix can start between a call and its result. Advance past any
-    // crossing pair so the hard item limit is retained without an orphan.
-    let mut pairs = Vec::new();
-    let mut pending_calls: HashMap<String, VecDeque<usize>> = HashMap::new();
-    for (index, item) in valid.iter().enumerate() {
-        match item {
-            ModelItem::ToolCall { call_id, .. } => {
-                pending_calls
-                    .entry(call_id.clone())
-                    .or_default()
-                    .push_back(index);
+            RuntimeEvent::AssistantCompleted { content, .. } => Some(ModelItem::AssistantMessage {
+                content: content.clone(),
+            }),
+            RuntimeEvent::ToolStarted {
+                call_id,
+                tool,
+                arguments,
             }
-            ModelItem::ToolResult { call_id, .. } => {
-                if let Some(queue) = pending_calls.get_mut(call_id)
-                    && let Some(call_index) = queue.pop_front()
-                {
-                    pairs.push((call_index, index));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let mut start = valid.len() - limit;
-    loop {
-        let adjusted_start = pairs
-            .iter()
-            .filter_map(|(call_index, result_index)| {
-                (*call_index < start && *result_index >= start).then_some(result_index + 1)
-            })
-            .max()
-            .unwrap_or(start);
-        if adjusted_start == start {
-            break;
-        }
-        start = adjusted_start;
-    }
-    valid.into_iter().skip(start).collect()
+            | RuntimeEvent::ToolProposed {
+                call_id,
+                tool,
+                arguments,
+            } => Some(ModelItem::ToolCall {
+                call_id: call_id.clone(),
+                name: tool.clone(),
+                arguments: arguments.clone(),
+            }),
+            RuntimeEvent::ToolCompleted {
+                call_id, output, ..
+            } => Some(ModelItem::ToolResult {
+                call_id: call_id.clone(),
+                output: output.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 struct ParsedLog {
@@ -434,14 +476,24 @@ fn reconstruct_thread(thread_id: &ThreadId, events: &[EventEnvelope]) -> Result<
     let mut status = ThreadStatus::Idle;
     for envelope in events {
         match &envelope.event {
-            RuntimeEvent::ThreadCreated | RuntimeEvent::AssistantDelta { .. } => {}
-            RuntimeEvent::UserMessage { content } => items.push(Item::UserMessage {
+            RuntimeEvent::ThreadCreated
+            | RuntimeEvent::AssistantDelta { .. }
+            | RuntimeEvent::ToolAuthorized { .. }
+            | RuntimeEvent::ToolExecutionStarted { .. } => {}
+            RuntimeEvent::UserMessage { content, .. } => items.push(Item::UserMessage {
                 content: content.clone(),
             }),
-            RuntimeEvent::AssistantCompleted { content } => items.push(Item::AssistantMessage {
-                content: content.clone(),
-            }),
+            RuntimeEvent::AssistantCompleted { content, .. } => {
+                items.push(Item::AssistantMessage {
+                    content: content.clone(),
+                })
+            }
             RuntimeEvent::ToolStarted {
+                call_id,
+                tool,
+                arguments,
+            }
+            | RuntimeEvent::ToolProposed {
                 call_id,
                 tool,
                 arguments,

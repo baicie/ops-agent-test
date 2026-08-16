@@ -6,7 +6,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{OpsCodexError, Result};
 
-use super::{ModelEvent, ModelEventSink, ModelOutput, ModelProvider, ModelRequest, ModelResponse};
+use super::{
+    ModelCapabilities, ModelEvent, ModelEventSink, ModelOutput, ModelProvider, ModelRequest,
+    ModelResponse,
+};
 
 #[derive(Clone)]
 pub struct FakeModelProvider {
@@ -29,6 +32,10 @@ impl FakeModelProvider {
 
 #[async_trait]
 impl ModelProvider for FakeModelProvider {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities::fake()
+    }
+
     async fn complete(
         &self,
         request: ModelRequest,

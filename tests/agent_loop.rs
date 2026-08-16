@@ -70,7 +70,7 @@ async fn model_tool_evidence_model_answer_closes_the_turn() -> anyhow::Result<()
     assert!(
         emitted
             .iter()
-            .any(|event| matches!(event, RuntimeEvent::ToolStarted { .. }))
+            .any(|event| matches!(event, RuntimeEvent::ToolProposed { .. }))
     );
     assert!(
         emitted

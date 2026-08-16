@@ -193,4 +193,98 @@ describe("opsReducer runtime events", () => {
       error: "docker is unavailable",
     });
   });
+
+  it("projects proposed tools, diagnosis claims, and unknown events", () => {
+    const proposed = opsReducer(initialState, {
+      type: "event/received",
+      payload: {
+        seq: 1,
+        threadId: "thread-1",
+        turnId: "turn-1",
+        type: "tool_proposed",
+        data: { tool_call_id: "call-1", tool: "log_query", arguments: { query: "{job=api}" } },
+      },
+    });
+    expect(proposed.items[0]).toMatchObject({ kind: "tool", status: "proposed", name: "log_query" });
+
+    const completed = opsReducer(proposed, {
+      type: "event/received",
+      payload: {
+        seq: 2,
+        threadId: "thread-1",
+        turnId: "turn-1",
+        type: "tool_completed",
+        data: {
+          tool_call_id: "call-1",
+          tool: "log_query",
+          success: true,
+          output: {},
+          evidence: { source: "loki", evidence_id: "ev-1" },
+        },
+      },
+    });
+    const diagnosed = opsReducer(completed, {
+      type: "event/received",
+      payload: {
+        seq: 3,
+        threadId: "thread-1",
+        turnId: "turn-1",
+        type: "assistant_completed",
+        data: {
+          content: "Logs confirm the outage.",
+          diagnosis: {
+            summary: "Logs confirm the outage.",
+            claims: [{ kind: "observed", statement: "Error lines spiked.", evidence_ids: ["ev-1"] }],
+          },
+        },
+      },
+    });
+    expect(diagnosed.items.at(-1)).toMatchObject({
+      kind: "message",
+      diagnosis: { summary: "Logs confirm the outage." },
+    });
+
+    const unknown = opsReducer(diagnosed, {
+      type: "event/received",
+      payload: {
+        seq: 4,
+        threadId: "thread-1",
+        turnId: "turn-1",
+        type: "unknown",
+        data: { _event_type: "future_checkpoint" },
+      },
+    });
+    expect(unknown.lastSeq).toBe(4);
+    expect(unknown.clientUpgradeHint).toContain("future_checkpoint");
+    expect(unknown.items).toHaveLength(diagnosed.items.length);
+
+    const selected = opsReducer(unknown, { type: "evidence/select", payload: "ev-1" });
+    expect(selected.selectedEvidenceId).toBe("ev-1");
+  });
+
+  it("keeps incident context on the user message and does not treat it as evidence", () => {
+    const next = opsReducer(initialState, {
+      type: "event/received",
+      payload: {
+        seq: 1,
+        threadId: "thread-1",
+        turnId: "turn-1",
+        type: "user_message",
+        data: {
+          content: "Investigate 5xx",
+          incident_context: { service: "order-service", environment: "staging" },
+        },
+      },
+    });
+
+    expect(next.items).toEqual([
+      expect.objectContaining({
+        kind: "message",
+        role: "user",
+        content: "Investigate 5xx",
+        incidentContext: { service: "order-service", environment: "staging" },
+      }),
+    ]);
+    expect(next.items.some((item) => item.kind === "tool")).toBe(false);
+  });
 });

@@ -123,13 +123,7 @@ async fn sse_replays_events_strictly_after_the_requested_sequence() -> anyhow::R
     let thread_id = ThreadId::new();
     store.create_thread(thread_id.clone()).await?;
     store
-        .append(
-            &thread_id,
-            None,
-            RuntimeEvent::UserMessage {
-                content: "replayed".into(),
-            },
-        )
+        .append(&thread_id, None, RuntimeEvent::user_message("replayed"))
         .await?;
     let response = router(state)
         .oneshot(request(
@@ -169,13 +163,7 @@ async fn sse_reconnect_honors_last_event_id() -> anyhow::Result<()> {
     store.create_thread(thread_id.clone()).await?;
     for content in ["already seen", "resume here"] {
         store
-            .append(
-                &thread_id,
-                None,
-                RuntimeEvent::UserMessage {
-                    content: content.into(),
-                },
-            )
+            .append(&thread_id, None, RuntimeEvent::user_message(content))
             .await?;
     }
     let response = router(state)

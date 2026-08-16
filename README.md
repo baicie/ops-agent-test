@@ -2,19 +2,36 @@
 
 OpsCodex is a local-first AIOps agent runtime written in Rust. It investigates runtime incidents through a bounded `Model -> Tool -> Evidence -> Model` loop and exposes the same session through a CLI or a React UI.
 
-The MVP is deliberately small: one Rust process, append-only JSONL sessions, REST/SSE, four read-oriented tools, and a two-container reproducible incident.
+The MVP is deliberately small: one Rust process, append-only JSONL sessions,
+REST/SSE, three structured read-only tools, an approval-gated opt-in `exec`
+escape hatch, and a two-container reproducible incident.
+
+## Product direction
+
+`v0.1.0` is the released Runtime MVP, not the end of the product. The repository's
+authoritative product goal, target architecture, staged delivery plan, and
+architecture decisions live in the [design documentation](docs/README.md).
+
+- [Final product goal](docs/PRODUCT_GOAL.md)
+- [Target architecture](docs/TARGET_ARCHITECTURE.md)
+- [Version roadmap and phase gates](docs/ROADMAP.md)
+- [Engineering delivery contract](docs/DELIVERY_CONTRACT.md)
+- [Architecture decision records](docs/adr/README.md)
+
+Implementation work after `v0.1.0` must identify its roadmap phase, satisfy that
+phase's acceptance gate, and update an ADR before changing a recorded decision.
 
 ## What is implemented
 
 - Hand-written Agent Runtime with Thread, Turn, Item, Context, Event and Tool abstractions
 - OpenAI Responses Provider with streaming text, function calls, usage and cancellation
-- `promql_query`, `docker_logs`, `http_get`, and opt-in `exec`
+- `promql_query`, `docker_logs`, `http_get`, Loki `log_query`, Tempo `trace_search` / `trace_get`, and opt-in `exec`
 - Safe/Ask/Forbidden policy decisions and interactive approval
 - Per-tool/model timeouts, 12-step default limit, 64 KiB output bounds and cancellation
 - One active Turn per Thread and four concurrent Turns globally by default
 - Append-only JSONL persistence with monotonic sequence numbers and reconnect replay
 - Axum REST API and SSE event stream
-- React/Vite UI for threads, streaming chat, tools, Evidence, approvals and Stop
+- React/Vite UI for threads, Alert Context, streaming chat, tools, Evidence-linked Diagnosis, approvals and Stop
 - Deterministic order-service incident with Prometheus metrics and Docker logs
 
 ## Architecture
@@ -30,7 +47,7 @@ Agent Runtime ---- JSONL Thread Store
      |
      +---- ModelProvider ---- OpenAI-compatible Responses API
      |
-     +---- Tool Registry ---- Prometheus / Docker / HTTP / approved Exec
+     +---- Tool Registry ---- Prometheus / Loki / Tempo / Docker / HTTP / approved Exec
 ```
 
 The Runtime only depends on the project's `ModelProvider` contract. OpenAI request and SSE types stay inside `src/model/openai.rs`.
@@ -78,7 +95,9 @@ printf 'Model API key: ' >&2
 IFS= read -rs OPENAI_API_KEY
 printf '\n' >&2
 export OPENAI_API_KEY
-cargo run -- run "Why is order-service failing?"
+cargo run -- run "Why is order-service failing?" \
+  --service order-service --environment staging \
+  --starts-at 2026-08-16T00:00:00Z --ends-at 2026-08-16T00:15:00Z
 unset OPENAI_API_KEY
 ```
 
@@ -131,6 +150,8 @@ Important defaults:
 | `runtime.model_timeout_seconds` | `120` |
 | `runtime.max_output_bytes` | `65536` |
 | `prometheus.url` | `http://localhost:9090` |
+| `loki.url` | `http://localhost:3100` |
+| `tempo.url` | `http://localhost:3200` |
 | `tools.exec` | `false` |
 | `server` | `127.0.0.1:3000` |
 
@@ -140,14 +161,21 @@ Important defaults:
 
 ```text
 GET    /healthz
-GET    /api/threads
-POST   /api/threads
-GET    /api/threads/:thread_id
-POST   /api/threads/:thread_id/turns
-GET    /api/threads/:thread_id/events?after=:seq
-POST   /api/approvals/:approval_id
-POST   /api/turns/:turn_id/interrupt
+GET    /metrics
+GET    /api/v1/threads
+POST   /api/v1/threads
+GET    /api/v1/threads/:thread_id
+GET    /api/v1/threads/:thread_id?after=:seq&limit=:n&stream_kind=domain
+POST   /api/v1/threads/:thread_id/turns
+GET    /api/v1/threads/:thread_id/events?after=:seq
+GET    /api/v1/threads/:thread_id/evidence/:evidence_id
+GET    /api/v1/artifacts/:sha256
+POST   /api/v1/approvals/:approval_id
+POST   /api/v1/turns/:turn_id/interrupt
 ```
+
+`/api` remains an alias for `/api/v1` during the compatibility window. Turns may include
+`incident_context`; Alert Context is an investigation hint and is not stored as Evidence.
 
 SSE responses use the JSONL sequence as the SSE `id`. A reconnect with `after=N` replays all durable events after `N`, then switches to live broadcast events without duplicates.
 
@@ -160,6 +188,8 @@ Each Thread is a human-readable event log:
   config.toml
   threads/
     <thread-id>.jsonl
+  artifacts/
+    <sha256>
 ```
 
 The Store serializes appends per process, validates monotonic sequence numbers, ignores an incomplete crash tail during replay, and repairs that tail before the next append.

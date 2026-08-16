@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use chrono::Utc;
 use opscodex::{
     model::ModelItem,
     runtime::{EvidenceMeta, RuntimeEvent, ThreadId, TurnId},
@@ -10,13 +9,7 @@ use serde_json::json;
 use tempfile::tempdir;
 
 fn evidence(source: &str) -> EvidenceMeta {
-    EvidenceMeta {
-        source: source.into(),
-        query: None,
-        timestamp: Utc::now(),
-        duration_ms: 1,
-        truncated: false,
-    }
+    EvidenceMeta::new(source).with_duration_ms(1)
 }
 
 #[tokio::test]
@@ -35,9 +28,7 @@ async fn concurrent_appends_have_monotonic_per_thread_sequences() {
                 .append(
                     &thread_id,
                     None,
-                    RuntimeEvent::UserMessage {
-                        content: format!("message-{index}"),
-                    },
+                    RuntimeEvent::user_message(format!("message-{index}")),
                 )
                 .await
                 .unwrap();
@@ -61,9 +52,7 @@ async fn history_uses_completed_items_and_ignores_streaming_deltas() {
     store.create_thread(thread_id.clone()).await.unwrap();
 
     let events = [
-        RuntimeEvent::UserMessage {
-            content: "What happened?".into(),
-        },
+        RuntimeEvent::user_message("What happened?"),
         RuntimeEvent::AssistantDelta {
             delta: "Checking".into(),
         },
@@ -79,9 +68,7 @@ async fn history_uses_completed_items_and_ignores_streaming_deltas() {
             evidence: evidence("prometheus"),
             success: true,
         },
-        RuntimeEvent::AssistantCompleted {
-            content: "The service is down.".into(),
-        },
+        RuntimeEvent::assistant_completed("The service is down."),
     ];
     for event in events {
         store
@@ -107,9 +94,7 @@ async fn history_limit_keeps_function_call_and_output_together() {
     store.create_thread(thread_id.clone()).await.unwrap();
 
     for event in [
-        RuntimeEvent::UserMessage {
-            content: "check service".into(),
-        },
+        RuntimeEvent::user_message("check service"),
         RuntimeEvent::ToolStarted {
             call_id: "call-1".into(),
             tool: "promql_query".into(),
@@ -149,9 +134,7 @@ async fn history_drops_unmatched_tool_items_from_interrupted_turns() {
     store.create_thread(thread_id.clone()).await.unwrap();
 
     for event in [
-        RuntimeEvent::UserMessage {
-            content: "diagnose".into(),
-        },
+        RuntimeEvent::user_message("diagnose"),
         RuntimeEvent::ToolStarted {
             call_id: "unfinished-call".into(),
             tool: "exec".into(),
@@ -164,9 +147,7 @@ async fn history_drops_unmatched_tool_items_from_interrupted_turns() {
             evidence: evidence("exec"),
             success: false,
         },
-        RuntimeEvent::AssistantCompleted {
-            content: "Evidence is incomplete.".into(),
-        },
+        RuntimeEvent::assistant_completed("Evidence is incomplete."),
     ] {
         store
             .append(&thread_id, Some(turn_id.clone()), event)
@@ -237,13 +218,7 @@ async fn append_recovers_from_a_partial_tail_without_reusing_a_sequence() {
     drop(file);
 
     let appended = store
-        .append(
-            &thread_id,
-            None,
-            RuntimeEvent::UserMessage {
-                content: "recovered".into(),
-            },
-        )
+        .append(&thread_id, None, RuntimeEvent::user_message("recovered"))
         .await
         .unwrap();
     let events = store.events_after(&thread_id, 0).await.unwrap();
@@ -252,7 +227,7 @@ async fn append_recovers_from_a_partial_tail_without_reusing_a_sequence() {
     assert_eq!(events.len(), 2);
     assert!(matches!(
         &events[1].event,
-        RuntimeEvent::UserMessage { content } if content == "recovered"
+        RuntimeEvent::UserMessage { content, .. } if content == "recovered"
     ));
 }
 
@@ -267,9 +242,7 @@ async fn thread_summaries_reconstruct_title_and_current_status() {
         .append(
             &thread_id,
             Some(turn_id.clone()),
-            RuntimeEvent::UserMessage {
-                content: "Why is order-service failing?".into(),
-            },
+            RuntimeEvent::user_message("Why is order-service failing?"),
         )
         .await
         .unwrap();

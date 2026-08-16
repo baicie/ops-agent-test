@@ -12,7 +12,9 @@ use crate::{
     OpsCodexError, Result,
     app::build_runtime,
     config::Config,
-    runtime::{AgentRuntime, EventEnvelope, RuntimeEvent, ThreadId, TurnId},
+    runtime::{
+        AgentRuntime, EventEnvelope, IncidentContext, RuntimeEvent, ThreadId, TurnId, TurnInput,
+    },
     server::{ServerState, router_with_web},
 };
 
@@ -38,6 +40,14 @@ pub enum Command {
     Run {
         #[arg(value_name = "PROMPT")]
         input: String,
+        #[arg(long)]
+        service: Option<String>,
+        #[arg(long)]
+        environment: Option<String>,
+        #[arg(long)]
+        starts_at: Option<String>,
+        #[arg(long)]
+        ends_at: Option<String>,
     },
     Serve {
         #[arg(long)]
@@ -57,7 +67,16 @@ pub async fn execute(cli: Cli) -> Result<()> {
     config.validate()?;
     let runtime = build_runtime(&config, cli.fake_model).await?;
     match cli.command {
-        Command::Run { input } => run(runtime, input).await,
+        Command::Run {
+            input,
+            service,
+            environment,
+            starts_at,
+            ends_at,
+        } => {
+            let incident_context = incident_from_flags(service, environment, starts_at, ends_at)?;
+            run(runtime, input, incident_context).await
+        }
         Command::Serve {
             host,
             port,
@@ -74,7 +93,11 @@ pub async fn execute(cli: Cli) -> Result<()> {
     }
 }
 
-async fn run(runtime: std::sync::Arc<AgentRuntime>, input: String) -> Result<()> {
+async fn run(
+    runtime: std::sync::Arc<AgentRuntime>,
+    input: String,
+    incident_context: Option<IncidentContext>,
+) -> Result<()> {
     let thread_id = ThreadId::new();
     runtime.store().create_thread(thread_id.clone()).await?;
     let turn_id = TurnId::new();
@@ -85,7 +108,10 @@ async fn run(runtime: std::sync::Arc<AgentRuntime>, input: String) -> Result<()>
     let turn = runtime.run_turn(
         thread_id,
         turn_id,
-        input,
+        TurnInput {
+            content: input,
+            incident_context,
+        },
         events.clone(),
         cancellation.clone(),
     );
@@ -119,6 +145,8 @@ async fn render_events(
                 println!("\n");
                 streaming = false;
             }
+            RuntimeEvent::ToolProposed { tool, .. } => println!("[tool] {tool} proposed"),
+            RuntimeEvent::ToolExecutionStarted { tool, .. } => println!("[tool] {tool} running"),
             RuntimeEvent::ToolStarted { tool, .. } => println!("[tool] {tool} running"),
             RuntimeEvent::ToolCompleted {
                 tool,
@@ -147,11 +175,48 @@ async fn render_events(
                 .unwrap_or(false);
                 let _ = runtime.policy().broker().resolve(&approval_id, approved);
             }
+            RuntimeEvent::UserMessage {
+                incident_context: Some(context),
+                ..
+            } => {
+                if let Some(service) = &context.service {
+                    println!("[incident] service={service}");
+                }
+            }
             RuntimeEvent::TurnFailed { error } => eprintln!("turn failed: {error}"),
             RuntimeEvent::TurnCancelled => eprintln!("turn cancelled"),
             _ => {}
         }
     }
+}
+
+fn incident_from_flags(
+    service: Option<String>,
+    environment: Option<String>,
+    starts_at: Option<String>,
+    ends_at: Option<String>,
+) -> Result<Option<IncidentContext>> {
+    if service.is_none() && environment.is_none() && starts_at.is_none() && ends_at.is_none() {
+        return Ok(None);
+    }
+    let parse_time = |value: Option<String>| -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+        value
+            .map(|value| {
+                chrono::DateTime::parse_from_rfc3339(&value)
+                    .map(|value| value.with_timezone(&chrono::Utc))
+                    .map_err(|error| OpsCodexError::Protocol(format!("invalid timestamp: {error}")))
+            })
+            .transpose()
+    };
+    let context = IncidentContext {
+        service,
+        environment,
+        starts_at: parse_time(starts_at)?,
+        ends_at: parse_time(ends_at)?,
+        ..IncidentContext::default()
+    };
+    context.validate()?;
+    Ok(Some(context))
 }
 
 async fn serve(

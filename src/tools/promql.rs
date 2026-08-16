@@ -1,7 +1,6 @@
 use std::time::Instant;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -9,7 +8,7 @@ use url::Url;
 
 use crate::{
     OpsCodexError, Result,
-    runtime::EvidenceMeta,
+    evidence::EvidenceMeta,
     tools::{
         Tool, ToolOutput, ToolRisk, read_bounded_body, truncate_output, truncate_output_with_marker,
     },
@@ -135,13 +134,10 @@ impl Tool for PromqlTool {
 
         Ok(ToolOutput {
             content,
-            evidence: EvidenceMeta {
-                source: "prometheus".into(),
-                query: Some(arguments.query),
-                timestamp: Utc::now(),
-                duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-                truncated,
-            },
+            evidence: EvidenceMeta::new("prometheus")
+                .with_query(arguments.query)
+                .with_duration_ms(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX))
+                .with_truncated(truncated),
         })
     }
 }

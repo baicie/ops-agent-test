@@ -6,6 +6,22 @@ All notable changes to OpsCodex are documented in this file. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Event schema v2 with stable IDs, stream kinds, and compatible v0.1 JSONL reads.
+- Evidence IDs, Claim-linked Diagnosis, artifact spillover, and default redaction.
+- Multi-budget context builder and provider capability declarations.
+- Alert/Incident Context on CLI, API, and Web, kept separate from Evidence.
+- Loki `log_query` and Tempo `trace_search` / `trace_get` read-only tools.
+- `/api/v1` routes, Evidence/Artifact APIs, `/metrics`, and Evidence-linked UI.
+
+### Documentation
+
+- Defined the `v1.0` product goal, scope, measurable completion criteria, and
+  target architecture.
+- Added detailed `v0.1` through `v1.0` phase plans, engineering delivery rules,
+  traceability, and architecture decision records.
+
 ## [0.1.0] - 2026-08-16
 
 ### Added

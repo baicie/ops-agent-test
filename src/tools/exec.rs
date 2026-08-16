@@ -1,7 +1,6 @@
 use std::time::Instant;
 
 use async_trait::async_trait;
-use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::process::Command;
@@ -9,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     OpsCodexError, Result,
-    runtime::EvidenceMeta,
+    evidence::EvidenceMeta,
     tools::{Tool, ToolOutput, ToolRisk, truncate_output},
 };
 
@@ -117,13 +116,10 @@ impl Tool for ExecTool {
                 "exit_code": output.status.code(),
                 "output": text
             }),
-            evidence: EvidenceMeta {
-                source: "exec".into(),
-                query: Some(arguments.command),
-                timestamp: Utc::now(),
-                duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-                truncated,
-            },
+            evidence: EvidenceMeta::new("exec")
+                .with_query(arguments.command)
+                .with_duration_ms(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX))
+                .with_truncated(truncated),
         })
     }
 }

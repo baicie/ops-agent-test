@@ -2,10 +2,10 @@ use std::str::FromStr;
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
-    http::StatusCode,
+    extract::{Path, Query, State},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
-    routing::{any, get, post},
+    routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -13,22 +13,33 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     OpsCodexError,
-    runtime::{ApprovalId, EventEnvelope, Item, Thread, ThreadId, TurnId},
+    runtime::{
+        ApprovalId, EventEnvelope, EvidenceId, IncidentContext, Item, StreamKind, Thread, ThreadId,
+        TurnId, TurnInput,
+    },
 };
 
 use super::{ServerState, sse};
 
 pub(crate) fn api_router(state: ServerState) -> Router {
+    let api = Router::new()
+        .route("/threads", get(list_threads).post(create_thread))
+        .route("/threads/{thread_id}", get(get_thread))
+        .route("/threads/{thread_id}/turns", post(create_turn))
+        .route("/threads/{thread_id}/events", get(sse::thread_events))
+        .route(
+            "/threads/{thread_id}/evidence/{evidence_id}",
+            get(get_evidence),
+        )
+        .route("/artifacts/{sha256}", get(get_artifact))
+        .route("/approvals/{approval_id}", post(resolve_approval))
+        .route("/turns/{turn_id}/interrupt", post(interrupt_turn))
+        .fallback(api_not_found);
     Router::new()
         .route("/healthz", get(health))
-        .route("/api/threads", get(list_threads).post(create_thread))
-        .route("/api/threads/{thread_id}", get(get_thread))
-        .route("/api/threads/{thread_id}/turns", post(create_turn))
-        .route("/api/threads/{thread_id}/events", get(sse::thread_events))
-        .route("/api/approvals/{approval_id}", post(resolve_approval))
-        .route("/api/turns/{turn_id}/interrupt", post(interrupt_turn))
-        .route("/api", any(api_not_found))
-        .route("/api/{*path}", any(api_not_found))
+        .route("/metrics", get(metrics))
+        .nest("/api", api.clone())
+        .nest("/api/v1", api)
         .with_state(state)
 }
 
@@ -36,8 +47,20 @@ async fn api_not_found() -> Response {
     ApiError::not_found("API route not found").into_response()
 }
 
-async fn health() -> Json<serde_json::Value> {
-    Json(json!({"status": "ok"}))
+async fn health(State(state): State<ServerState>) -> Json<serde_json::Value> {
+    Json(json!({
+        "status": "ok",
+        "store": "ok",
+        "provider": "configured",
+        "turns_started": state.runtime.metrics().turns_started.load(std::sync::atomic::Ordering::Relaxed),
+    }))
+}
+
+async fn metrics(State(state): State<ServerState>) -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        state.runtime.metrics().render_prometheus(),
+    )
 }
 
 async fn list_threads(State(state): State<ServerState>) -> ApiResult<impl IntoResponse> {
@@ -49,7 +72,21 @@ struct CreateThreadResponse {
     id: ThreadId,
 }
 
-async fn create_thread(State(state): State<ServerState>) -> ApiResult<impl IntoResponse> {
+#[derive(Default, Deserialize)]
+struct CreateThreadRequest {
+    #[serde(default)]
+    incident_context: Option<IncidentContext>,
+}
+
+async fn create_thread(
+    State(state): State<ServerState>,
+    body: Option<Json<CreateThreadRequest>>,
+) -> ApiResult<impl IntoResponse> {
+    if let Some(Json(request)) = &body
+        && let Some(context) = &request.incident_context
+    {
+        context.validate()?;
+    }
     let thread_id = ThreadId::new();
     let created = state
         .runtime
@@ -66,6 +103,7 @@ async fn create_thread(State(state): State<ServerState>) -> ApiResult<impl IntoR
 async fn get_thread(
     State(state): State<ServerState>,
     Path(thread_id): Path<String>,
+    Query(query): Query<ThreadQuery>,
 ) -> ApiResult<impl IntoResponse> {
     let thread_id = parse_id::<ThreadId>("thread", &thread_id)?;
     let store = state.runtime.store();
@@ -74,12 +112,26 @@ async fn get_thread(
         Item::UserMessage { content } => Some(content.chars().take(120).collect()),
         _ => None,
     });
-    let events = store.events_after(&thread_id, 0).await?;
+    let mut events = store.events_after(&thread_id, query.after).await?;
+    if let Some(kind) = query.stream_kind {
+        events.retain(|envelope| envelope.stream_kind == kind);
+    }
+    if let Some(limit) = query.limit {
+        events.truncate(limit.max(1));
+    }
     Ok(Json(ThreadDetailResponse {
         thread,
         title,
         events,
     }))
+}
+
+#[derive(Default, Deserialize)]
+struct ThreadQuery {
+    #[serde(default)]
+    after: u64,
+    limit: Option<usize>,
+    stream_kind: Option<StreamKind>,
 }
 
 #[derive(Serialize)]
@@ -93,6 +145,8 @@ struct ThreadDetailResponse {
 #[derive(Deserialize)]
 struct CreateTurnRequest {
     input: String,
+    #[serde(default)]
+    incident_context: Option<IncidentContext>,
 }
 
 #[derive(Serialize)]
@@ -116,6 +170,9 @@ async fn create_turn(
         return Err(ApiError::bad_request("input exceeds 32 KiB"));
     }
 
+    if let Some(context) = &request.incident_context {
+        context.validate()?;
+    }
     let turn_id = TurnId::new();
     let cancellation = CancellationToken::new();
     let inserted = state
@@ -132,7 +189,10 @@ async fn create_turn(
     let active_turns = state.active_turns.clone();
     let task_thread_id = thread_id.clone();
     let task_turn_id = turn_id.clone();
-    let input = input.to_owned();
+    let input = TurnInput {
+        content: input.to_owned(),
+        incident_context: request.incident_context,
+    };
     tokio::spawn(async move {
         let result = runtime
             .run_turn(
@@ -204,6 +264,43 @@ async fn interrupt_turn(
         StatusCode::ACCEPTED,
         Json(json!({"turn_id": turn_id, "status": "cancelling"})),
     ))
+}
+
+async fn get_evidence(
+    State(state): State<ServerState>,
+    Path((thread_id, evidence_id)): Path<(String, String)>,
+) -> ApiResult<impl IntoResponse> {
+    let thread_id = parse_id::<ThreadId>("thread", &thread_id)?;
+    let evidence_id = parse_id::<EvidenceId>("evidence", &evidence_id)?;
+    let evidence = state
+        .runtime
+        .store()
+        .get_evidence(&thread_id, &evidence_id)
+        .await?;
+    Ok(Json(evidence))
+}
+
+#[derive(Deserialize)]
+struct ArtifactQuery {
+    #[serde(default = "default_artifact_bytes")]
+    max_bytes: usize,
+}
+
+const fn default_artifact_bytes() -> usize {
+    64 * 1024
+}
+
+async fn get_artifact(
+    State(state): State<ServerState>,
+    Path(sha256): Path<String>,
+    Query(query): Query<ArtifactQuery>,
+) -> ApiResult<impl IntoResponse> {
+    let bytes = state
+        .runtime
+        .artifacts()
+        .get(&sha256, query.max_bytes)
+        .await?;
+    Ok(([(header::CONTENT_TYPE, "application/octet-stream")], bytes))
 }
 
 pub(crate) fn parse_thread_query(value: &str) -> ApiResult<ThreadId> {
@@ -285,4 +382,5 @@ impl IntoResponse for ApiError {
 pub(crate) struct EventQuery {
     #[serde(default)]
     pub(crate) after: u64,
+    pub(crate) stream_kind: Option<StreamKind>,
 }

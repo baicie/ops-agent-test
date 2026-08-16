@@ -6,7 +6,8 @@ use uuid::Uuid;
 use crate::{OpsCodexError, Result};
 
 use super::{
-    ModelEvent, ModelEventSink, ModelItem, ModelOutput, ModelProvider, ModelRequest, ModelResponse,
+    ModelCapabilities, ModelEvent, ModelEventSink, ModelItem, ModelOutput, ModelProvider,
+    ModelRequest, ModelResponse,
 };
 
 #[derive(Default)]
@@ -14,6 +15,10 @@ pub struct DemoModelProvider;
 
 #[async_trait]
 impl ModelProvider for DemoModelProvider {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities::fake()
+    }
+
     async fn complete(
         &self,
         request: ModelRequest,
@@ -55,9 +60,21 @@ impl ModelProvider for DemoModelProvider {
                 _ => None,
             })
             .unwrap_or_else(|| "No tool evidence was available.".into());
-        let answer = format!(
-            "Summary\nThe local diagnostic probe completed.\n\nEvidence\n- http_get returned: {evidence}\n\nDiagnosis\nThe available health evidence is the only basis for this local-mode result.\n\nConfidence: 0.55\n\nRecommended next actions\n1. Start the demo order-service if the probe failed.\n2. Use the OpenAI provider for autonomous multi-source investigation."
-        );
+        let answer = serde_json::json!({
+            "summary": "The local diagnostic probe completed.",
+            "claims": [{
+                "kind": "observed",
+                "statement": format!("http_get returned: {evidence}"),
+                "evidence_ids": [],
+                "confidence": "medium"
+            }],
+            "recommended_actions": [
+                "Start the demo order-service if the probe failed.",
+                "Use a Responses-compatible provider for autonomous multi-source investigation."
+            ],
+            "limitations": ["Local fake-model mode only inspected the health endpoint."]
+        })
+        .to_string();
         let _ = sink.send(ModelEvent::MessageDelta(answer.clone()));
         Ok(ModelResponse::new(vec![ModelOutput::Message {
             content: answer,

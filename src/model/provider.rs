@@ -94,8 +94,52 @@ pub enum ModelEvent {
 
 pub type ModelEventSink = mpsc::UnboundedSender<ModelEvent>;
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModelCapabilities {
+    pub streaming: bool,
+    pub tool_calls: bool,
+    pub parallel_calls: bool,
+    pub usage: bool,
+    pub reasoning_control: bool,
+    pub continuation: bool,
+    pub request_idempotency: bool,
+    pub structured_output: bool,
+}
+
+impl ModelCapabilities {
+    pub fn openai_responses() -> Self {
+        Self {
+            streaming: true,
+            tool_calls: true,
+            parallel_calls: true,
+            usage: true,
+            reasoning_control: true,
+            continuation: false,
+            request_idempotency: false,
+            structured_output: false,
+        }
+    }
+
+    pub fn fake() -> Self {
+        Self {
+            streaming: true,
+            tool_calls: true,
+            parallel_calls: false,
+            usage: false,
+            reasoning_control: false,
+            continuation: false,
+            request_idempotency: false,
+            structured_output: false,
+        }
+    }
+}
+
 #[async_trait]
 pub trait ModelProvider: Send + Sync {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities::fake()
+    }
+
     async fn complete(
         &self,
         request: ModelRequest,

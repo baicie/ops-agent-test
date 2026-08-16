@@ -6,8 +6,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{OpsCodexError, Result};
 
 use super::{
-    ModelEvent, ModelEventSink, ModelItem, ModelOutput, ModelProvider, ModelRequest, ModelResponse,
-    Usage,
+    ModelCapabilities, ModelEvent, ModelEventSink, ModelItem, ModelOutput, ModelProvider,
+    ModelRequest, ModelResponse, Usage,
 };
 
 const DEFAULT_ENDPOINT: &str = "https://api.openai.com/v1/responses";
@@ -75,6 +75,10 @@ impl OpenAIResponsesProvider {
 
 #[async_trait]
 impl ModelProvider for OpenAIResponsesProvider {
+    fn capabilities(&self) -> ModelCapabilities {
+        ModelCapabilities::openai_responses()
+    }
+
     async fn complete(
         &self,
         request: ModelRequest,

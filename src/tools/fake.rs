@@ -1,11 +1,10 @@
 use async_trait::async_trait;
-use chrono::Utc;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     OpsCodexError, Result,
-    runtime::EvidenceMeta,
+    evidence::EvidenceMeta,
     tools::{Tool, ToolOutput, ToolRisk},
 };
 
@@ -61,13 +60,7 @@ impl Tool for FakeTool {
         }
         Ok(ToolOutput {
             content: self.output.clone(),
-            evidence: EvidenceMeta {
-                source: self.name.clone(),
-                query: None,
-                timestamp: Utc::now(),
-                duration_ms: 0,
-                truncated: false,
-            },
+            evidence: EvidenceMeta::new(self.name.clone()),
         })
     }
 }

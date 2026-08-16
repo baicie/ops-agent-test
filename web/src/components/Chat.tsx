@@ -1,7 +1,7 @@
-import { AlertCircle, Plus, SearchCode, X } from "lucide-react";
+import { AlertCircle, Info, Plus, SearchCode, X } from "lucide-react";
 import { useEffect, useRef } from "react";
 
-import type { OpsState } from "../types";
+import type { IncidentContext, OpsState } from "../types";
 import { Approval } from "./Approval";
 import { Composer } from "./Composer";
 import { Message } from "./Message";
@@ -15,10 +15,17 @@ interface ChatProps {
   stopping: boolean;
   resolvingApprovals: Set<string>;
   onNewThread: () => void;
-  onSend: (input: string) => void;
+  onSend: (input: string, incidentContext?: IncidentContext) => void;
   onStop: () => void;
   onApproval: (approvalId: string, approved: boolean) => void;
   onDismissError: () => void;
+  onSelectEvidence: (evidenceId: string | null) => void;
+}
+
+function evidenceIdOf(item: OpsState["items"][number]): string | undefined {
+  if (item.kind !== "tool") return undefined;
+  const evidenceId = item.evidence?.evidence_id;
+  return typeof evidenceId === "string" ? evidenceId : undefined;
 }
 
 export function Chat({
@@ -31,12 +38,24 @@ export function Chat({
   onStop,
   onApproval,
   onDismissError,
+  onSelectEvidence,
 }: ChatProps) {
   const endRef = useRef<HTMLDivElement>(null);
+  const evidencePresent = state.items.some(
+    (item) => evidenceIdOf(item) === state.selectedEvidenceId,
+  );
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: "end", behavior: state.turnStatus === "running" ? "smooth" : "auto" });
   }, [state.items, state.turnStatus]);
+
+  useEffect(() => {
+    if (!state.selectedEvidenceId || !evidencePresent) return;
+    document.getElementById(`evidence-${state.selectedEvidenceId}`)?.scrollIntoView({
+      block: "center",
+      behavior: "smooth",
+    });
+  }, [evidencePresent, state.selectedEvidenceId]);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-[#fafbfc]">
@@ -45,6 +64,29 @@ export function Chat({
           <AlertCircle aria-hidden="true" className="h-4 w-4 shrink-0" />
           <span className="min-w-0 flex-1 truncate">{state.error}</span>
           <Button variant="ghost" size="icon" className="h-7 w-7 text-red-700" aria-label="Dismiss error" onClick={onDismissError}>
+            <X aria-hidden="true" className="h-4 w-4" />
+          </Button>
+        </div>
+      )}
+      {state.clientUpgradeHint && (
+        <div role="status" className="flex shrink-0 items-center gap-2 border-b border-sky-200 bg-sky-50 px-4 py-2 text-xs text-sky-900">
+          <Info aria-hidden="true" className="h-4 w-4 shrink-0" />
+          <span className="min-w-0 flex-1 truncate">{state.clientUpgradeHint}</span>
+        </div>
+      )}
+      {state.selectedEvidenceId && !evidencePresent && (
+        <div role="status" className="flex shrink-0 items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900">
+          <Info aria-hidden="true" className="h-4 w-4 shrink-0" />
+          <span className="min-w-0 flex-1">
+            Evidence {state.selectedEvidenceId} is not in this timeline. It may be unavailable or past retention.
+          </span>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            aria-label="Clear selected evidence"
+            onClick={() => onSelectEvidence(null)}
+          >
             <X aria-hidden="true" className="h-4 w-4" />
           </Button>
         </div>
@@ -78,11 +120,24 @@ export function Chat({
         ) : (
           <div className="mx-auto w-full max-w-3xl space-y-7 px-4 py-8 sm:px-8 sm:py-10">
             {state.items.map((item) => {
-              if (item.kind === "message") return <Message key={item.id} item={item} />;
+              if (item.kind === "message") {
+                return (
+                  <Message
+                    key={item.id}
+                    item={item}
+                    selectedEvidenceId={state.selectedEvidenceId}
+                    onSelectEvidence={onSelectEvidence}
+                  />
+                );
+              }
               if (item.kind === "tool") {
                 return (
                   <div key={item.id} className="pl-0 sm:pl-12">
-                    <ToolCall item={item} />
+                    <ToolCall
+                      item={item}
+                      highlighted={evidenceIdOf(item) === state.selectedEvidenceId}
+                      onSelectEvidence={onSelectEvidence}
+                    />
                   </div>
                 );
               }

@@ -11,7 +11,7 @@ use axum::{
 };
 use tokio::sync::broadcast;
 
-use crate::runtime::EventEnvelope;
+use crate::{runtime::EventEnvelope, telemetry::RuntimeMetrics};
 
 use super::{
     ServerState,
@@ -35,7 +35,13 @@ pub(crate) async fn thread_events(
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(0);
     let after = query.after.max(header_after);
-    let replay = store.events_after(&thread_id, after).await?;
+    let mut replay = store.events_after(&thread_id, after).await?;
+    if let Some(kind) = query.stream_kind {
+        replay.retain(|envelope| envelope.stream_kind == kind);
+    }
+    let stream_kind = query.stream_kind;
+    let metrics = state.runtime.metrics();
+    RuntimeMetrics::add(&metrics.sse_replay_events, replay.len() as u64);
     let output = stream! {
         let mut last_seq = after;
         for envelope in replay {
@@ -44,14 +50,22 @@ pub(crate) async fn thread_events(
         }
         loop {
             match receiver.recv().await {
-                Ok(envelope) if envelope.seq > last_seq => {
+                Ok(envelope) if envelope.seq > last_seq
+                    && stream_kind.is_none_or(|kind| envelope.stream_kind == kind) => {
                     last_seq = envelope.seq;
                     yield Ok::<Event, Infallible>(sse_event(envelope));
                 }
+                Ok(envelope) if envelope.seq > last_seq => {
+                    last_seq = envelope.seq;
+                }
                 Ok(_) => {}
                 Err(broadcast::error::RecvError::Lagged(_)) => {
+                    RuntimeMetrics::inc(&metrics.sse_lag_recoveries);
                     match store.events_after(&thread_id, last_seq).await {
-                        Ok(missed) => {
+                        Ok(mut missed) => {
+                            if let Some(kind) = stream_kind {
+                                missed.retain(|envelope| envelope.stream_kind == kind);
+                            }
                             for envelope in missed {
                                 last_seq = last_seq.max(envelope.seq);
                                 yield Ok::<Event, Infallible>(sse_event(envelope));

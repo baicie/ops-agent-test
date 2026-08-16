@@ -108,7 +108,9 @@ async fn multi_source_incident_flow_reinjects_evidence_until_diagnosis() -> anyh
     let mut last = None;
     while let Ok(envelope) = receiver.try_recv() {
         match envelope.event {
-            RuntimeEvent::ToolStarted { .. } => tool_started += 1,
+            RuntimeEvent::ToolProposed { .. } | RuntimeEvent::ToolStarted { .. } => {
+                tool_started += 1
+            }
             RuntimeEvent::ToolCompleted { .. } => tool_completed += 1,
             event => last = Some(event),
         }

@@ -1,7 +1,6 @@
 use std::{collections::HashSet, path::PathBuf, time::Instant};
 
 use async_trait::async_trait;
-use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::process::Command;
@@ -9,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     OpsCodexError, Result,
-    runtime::EvidenceMeta,
+    evidence::EvidenceMeta,
     tools::{Tool, ToolOutput, ToolRisk, truncate_output},
 };
 
@@ -147,16 +146,13 @@ impl Tool for DockerLogsTool {
 
         Ok(ToolOutput {
             content: json!({"container": arguments.container, "logs": logs}),
-            evidence: EvidenceMeta {
-                source: "docker".into(),
-                query: Some(format!(
+            evidence: EvidenceMeta::new("docker")
+                .with_query(format!(
                     "docker logs --since {} --tail {} {}",
                     arguments.since, arguments.tail, arguments.container
-                )),
-                timestamp: Utc::now(),
-                duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-                truncated,
-            },
+                ))
+                .with_duration_ms(started.elapsed().as_millis().try_into().unwrap_or(u64::MAX))
+                .with_truncated(truncated),
         })
     }
 }

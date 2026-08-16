@@ -1,6 +1,8 @@
 import type {
   ApprovalItem,
+  Diagnosis,
   EvidenceMeta,
+  IncidentContext,
   MessageItem,
   NormalizedEvent,
   OpsState,
@@ -20,6 +22,8 @@ export const initialState: OpsState = {
   turnStatus: "idle",
   lastSeq: 0,
   error: null,
+  selectedEvidenceId: null,
+  clientUpgradeHint: null,
   sidebarOpen: false,
 };
 
@@ -31,13 +35,17 @@ export type OpsAction =
   | { type: "thread/created"; payload: ThreadSummary }
   | { type: "thread/loading" }
   | { type: "thread/loaded"; payload: ThreadDetail }
-  | { type: "message/optimistic"; payload: { id: string; content: string } }
+  | {
+      type: "message/optimistic";
+      payload: { id: string; content: string; incidentContext?: IncidentContext | null };
+    }
   | { type: "turn/started"; payload: { turnId: string } }
   | { type: "event/received"; payload: NormalizedEvent }
   | { type: "connection/changed"; payload: OpsState["connectionStatus"] }
   | { type: "approval/resolved"; payload: { approvalId: string; approved: boolean } }
   | { type: "error/set"; payload: string }
   | { type: "error/clear" }
+  | { type: "evidence/select"; payload: string | null }
   | { type: "sidebar/set"; payload: boolean };
 
 function stringValue(value: unknown): string | undefined {
@@ -56,6 +64,42 @@ function recordValue(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+
+function asDiagnosis(value: unknown): Diagnosis | null {
+  const record = recordValue(value);
+  const summary = stringValue(record.summary);
+  if (!summary && !Array.isArray(record.claims)) return null;
+  const claims = Array.isArray(record.claims)
+    ? record.claims.map((claim) => {
+        const item = recordValue(claim);
+        return {
+          claim_id: stringValue(item.claim_id),
+          kind: stringValue(item.kind) ?? "inferred",
+          statement: stringValue(item.statement) ?? "",
+          evidence_ids: Array.isArray(item.evidence_ids)
+            ? item.evidence_ids.filter((id): id is string => typeof id === "string")
+            : [],
+          confidence: stringValue(item.confidence),
+        };
+      })
+    : [];
+  return {
+    summary: summary ?? "",
+    claims,
+    recommended_actions: Array.isArray(record.recommended_actions)
+      ? record.recommended_actions.filter((item): item is string => typeof item === "string")
+      : [],
+    limitations: Array.isArray(record.limitations)
+      ? record.limitations.filter((item): item is string => typeof item === "string")
+      : [],
+  };
+}
+
+function asIncidentContext(value: unknown): IncidentContext | null {
+  const record = recordValue(value);
+  if (Object.keys(record).length === 0) return null;
+  return record as IncidentContext;
 }
 
 function eventText(data: Record<string, unknown>): string {
@@ -135,6 +179,7 @@ function applyRuntimeEvent(state: OpsState, event: NormalizedEvent): OpsState {
         streaming: false,
         turnId: event.turnId,
         timestamp: event.timestamp,
+        incidentContext: asIncidentContext(event.data.incident_context),
       };
       const items = [...base.items];
       if (optimisticIndex >= 0) {
@@ -184,6 +229,7 @@ function applyRuntimeEvent(state: OpsState, event: NormalizedEvent): OpsState {
 
     case "assistant_completed": {
       const completedContent = eventText(event.data);
+      const diagnosis = asDiagnosis(event.data.diagnosis);
       const existingIndex = lastStreamingAssistantIndex(base.items, event.turnId);
       if (existingIndex < 0) {
         const message: MessageItem = {
@@ -194,6 +240,7 @@ function applyRuntimeEvent(state: OpsState, event: NormalizedEvent): OpsState {
           streaming: false,
           turnId: event.turnId,
           timestamp: event.timestamp,
+          diagnosis,
         };
         return { ...base, items: [...base.items, message] };
       }
@@ -203,10 +250,12 @@ function applyRuntimeEvent(state: OpsState, event: NormalizedEvent): OpsState {
         ...existing,
         content: completedContent || existing.content,
         streaming: false,
+        diagnosis: diagnosis ?? existing.diagnosis,
       };
       return { ...base, items };
     }
 
+    case "tool_proposed":
     case "tool_started": {
       const callId = toolCallId(event);
       const item: ToolItem = {
@@ -215,7 +264,7 @@ function applyRuntimeEvent(state: OpsState, event: NormalizedEvent): OpsState {
         callId,
         name: toolName(event.data),
         arguments: recordValue(event.data.arguments ?? event.data.input),
-        status: "running",
+        status: event.type === "tool_proposed" ? "proposed" : "running",
         turnId: event.turnId,
         timestamp: event.timestamp,
       };
@@ -227,6 +276,29 @@ function applyRuntimeEvent(state: OpsState, event: NormalizedEvent): OpsState {
       return { ...base, items: [...settledItems, item], turnStatus: "running" };
     }
 
+    case "tool_authorized": {
+      const callId = toolCallId(event);
+      return {
+        ...base,
+        items: base.items.map((item): TimelineItem =>
+          item.kind === "tool" && item.callId === callId
+            ? { ...item, status: item.status === "completed" || item.status === "failed" ? item.status : "authorized" }
+            : item,
+        ),
+      };
+    }
+
+    case "tool_execution_started": {
+      const callId = toolCallId(event);
+      return {
+        ...base,
+        turnStatus: "running",
+        items: base.items.map((item): TimelineItem =>
+          item.kind === "tool" && item.callId === callId ? { ...item, status: "running" } : item,
+        ),
+      };
+    }
+
     case "tool_completed": {
       const callId = toolCallId(event);
       const name = toolName(event.data);
@@ -236,7 +308,7 @@ function applyRuntimeEvent(state: OpsState, event: NormalizedEvent): OpsState {
       if (existingIndex < 0) {
         for (let index = base.items.length - 1; index >= 0; index -= 1) {
           const item = base.items[index];
-          if (item.kind === "tool" && item.status === "running" && item.name === name) {
+          if (item.kind === "tool" && (item.status === "running" || item.status === "proposed" || item.status === "authorized") && item.name === name) {
             existingIndex = index;
             break;
           }
@@ -334,6 +406,14 @@ function applyRuntimeEvent(state: OpsState, event: NormalizedEvent): OpsState {
         { ...base, activeTurnId: null, turnStatus: "cancelled" },
         "cancelled",
       );
+
+    default: {
+      const originalType = stringValue(event.data._event_type) ?? event.type;
+      return {
+        ...base,
+        clientUpgradeHint: `Client upgrade required for event ${originalType}`,
+      };
+    }
   }
 }
 
@@ -347,6 +427,8 @@ function replayThread(state: OpsState, detail: ThreadDetail): OpsState {
     turnStatus: detail.status === "running" ? "running" : "idle",
     lastSeq: 0,
     error: null,
+    selectedEvidenceId: null,
+    clientUpgradeHint: null,
   };
   return detail.events.reduce(applyRuntimeEvent, emptyThread);
 }
@@ -370,6 +452,8 @@ export function opsReducer(state: OpsState, action: OpsAction): OpsState {
         connectionStatus: "connecting",
         sidebarOpen: false,
         error: null,
+        selectedEvidenceId: null,
+        clientUpgradeHint: null,
       };
     case "thread/created":
       return {
@@ -382,6 +466,8 @@ export function opsReducer(state: OpsState, action: OpsAction): OpsState {
         loadStatus: "ready",
         sidebarOpen: false,
         error: null,
+        selectedEvidenceId: null,
+        clientUpgradeHint: null,
       };
     case "thread/loading":
       return { ...state, loadStatus: "loading", error: null };
@@ -414,6 +500,7 @@ export function opsReducer(state: OpsState, action: OpsAction): OpsState {
         streaming: false,
         optimistic: true,
         turnId: null,
+        incidentContext: action.payload.incidentContext,
       };
       const next = { ...state, items: [...state.items, item], error: null };
       if (!state.activeThreadId) return next;
@@ -450,6 +537,8 @@ export function opsReducer(state: OpsState, action: OpsAction): OpsState {
       return { ...state, error: action.payload };
     case "error/clear":
       return { ...state, error: null };
+    case "evidence/select":
+      return { ...state, selectedEvidenceId: action.payload };
     case "sidebar/set":
       return { ...state, sidebarOpen: action.payload };
   }

@@ -3,13 +3,16 @@ import {
   Check,
   ChevronDown,
   CircleX,
+  Clock,
   Globe2,
   LoaderCircle,
   ScrollText,
+  ShieldCheck,
   TerminalSquare,
+  Waypoints,
   Wrench,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import type { ToolItem } from "../types";
 import { cn } from "../lib/utils";
@@ -21,12 +24,19 @@ function ToolIcon({ name }: { name: string }) {
   const className = "h-4 w-4";
   if (name.includes("prom")) return <ChartNoAxesCombined aria-hidden="true" className={className} />;
   if (name.includes("log")) return <ScrollText aria-hidden="true" className={className} />;
+  if (name.includes("trace")) return <Waypoints aria-hidden="true" className={className} />;
   if (name.includes("http")) return <Globe2 aria-hidden="true" className={className} />;
   if (name === "exec") return <TerminalSquare aria-hidden="true" className={className} />;
   return <Wrench aria-hidden="true" className={className} />;
 }
 
 function StatusIcon({ status }: Pick<ToolItem, "status">) {
+  if (status === "proposed") {
+    return <Clock aria-label="Proposed" className="h-3.5 w-3.5 text-zinc-500" />;
+  }
+  if (status === "authorized") {
+    return <ShieldCheck aria-label="Authorized" className="h-3.5 w-3.5 text-sky-700" />;
+  }
   if (status === "running") {
     return <LoaderCircle aria-label="Running" className="h-3.5 w-3.5 animate-spin text-sky-600" />;
   }
@@ -42,14 +52,31 @@ function formattedValue(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
-export function ToolCall({ item }: { item: ToolItem }) {
-  const [open, setOpen] = useState(false);
+export function ToolCall({
+  item,
+  highlighted = false,
+  onSelectEvidence,
+}: {
+  item: ToolItem;
+  highlighted?: boolean;
+  onSelectEvidence?: (evidenceId: string) => void;
+}) {
+  const [open, setOpen] = useState(highlighted);
   const hasArguments = Object.keys(item.arguments).length > 0;
   const hasDetails = hasArguments || item.output !== undefined || item.evidence || item.error;
 
+  useEffect(() => {
+    if (highlighted) setOpen(true);
+  }, [highlighted]);
+
   return (
     <Collapsible open={open} onOpenChange={setOpen} disabled={!hasDetails}>
-      <section className="overflow-hidden rounded-md border border-zinc-200 bg-white shadow-sm">
+      <section
+        className={cn(
+          "overflow-hidden rounded-md border bg-white shadow-sm",
+          highlighted ? "border-emerald-300 ring-1 ring-emerald-200" : "border-zinc-200",
+        )}
+      >
         <CollapsibleTrigger asChild>
           <button
             type="button"
@@ -62,6 +89,9 @@ export function ToolCall({ item }: { item: ToolItem }) {
               {item.name}
             </span>
             <StatusIcon status={item.status} />
+            {item.status !== "completed" && item.status !== "failed" && (
+              <Badge className="bg-zinc-50 capitalize text-zinc-500">{item.status}</Badge>
+            )}
             {item.durationMs !== undefined && (
               <Badge className="bg-zinc-50 font-mono text-zinc-500">{item.durationMs}ms</Badge>
             )}
@@ -85,7 +115,11 @@ export function ToolCall({ item }: { item: ToolItem }) {
             )}
             {item.evidence && (
               <div className="border-t border-zinc-100">
-                <Evidence evidence={item.evidence} />
+                <Evidence
+                  evidence={item.evidence}
+                  highlighted={highlighted}
+                  onSelect={onSelectEvidence}
+                />
               </div>
             )}
             {(item.output !== undefined || item.error) && (

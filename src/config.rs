@@ -10,6 +10,8 @@ pub struct Config {
     pub model: ModelConfig,
     pub runtime: RuntimeSettings,
     pub prometheus: PrometheusConfig,
+    pub loki: LokiConfig,
+    pub tempo: TempoConfig,
     pub targets: TargetConfig,
     pub tools: ToolsConfig,
     pub server: ServerConfig,
@@ -73,6 +75,21 @@ impl Config {
             ("tool_timeout_seconds", self.runtime.tool_timeout_seconds),
             ("model_timeout_seconds", self.runtime.model_timeout_seconds),
             ("max_output_bytes", self.runtime.max_output_bytes as u64),
+            ("context_items", self.runtime.context_items as u64),
+            ("context_max_tokens", self.runtime.context_max_tokens as u64),
+            ("context_max_bytes", self.runtime.context_max_bytes as u64),
+            (
+                "context_max_evidence",
+                self.runtime.context_max_evidence as u64,
+            ),
+            (
+                "context_max_tool_calls",
+                self.runtime.context_max_tool_calls as u64,
+            ),
+            (
+                "inline_artifact_bytes",
+                self.runtime.inline_artifact_bytes as u64,
+            ),
         ] {
             if value == 0 {
                 return Err(OpsCodexError::Protocol(format!(
@@ -94,6 +111,17 @@ impl Config {
             return Err(OpsCodexError::Protocol(
                 "model.reasoning_effort must be one of none, minimal, low, medium, high, or xhigh"
                     .into(),
+            ));
+        }
+        if self.loki.max_range_seconds == 0 || self.tempo.max_range_seconds == 0 {
+            return Err(crate::OpsCodexError::Protocol(
+                "loki.max_range_seconds and tempo.max_range_seconds must be greater than zero"
+                    .into(),
+            ));
+        }
+        if self.loki.max_lines == 0 {
+            return Err(crate::OpsCodexError::Protocol(
+                "loki.max_lines must be greater than zero".into(),
             ));
         }
         Ok(())
@@ -131,6 +159,12 @@ pub struct RuntimeSettings {
     pub model_timeout_seconds: u64,
     pub max_output_bytes: usize,
     pub context_items: usize,
+    pub context_max_tokens: usize,
+    pub context_max_bytes: usize,
+    pub context_max_evidence: usize,
+    pub context_max_tool_calls: usize,
+    pub context_max_cost_micros: u64,
+    pub inline_artifact_bytes: usize,
 }
 
 impl Default for RuntimeSettings {
@@ -142,6 +176,12 @@ impl Default for RuntimeSettings {
             model_timeout_seconds: 120,
             max_output_bytes: 64 * 1024,
             context_items: 100,
+            context_max_tokens: 24_000,
+            context_max_bytes: 96_000,
+            context_max_evidence: 32,
+            context_max_tool_calls: 24,
+            context_max_cost_micros: 0,
+            inline_artifact_bytes: 8 * 1024,
         }
     }
 }
@@ -156,6 +196,44 @@ impl Default for PrometheusConfig {
     fn default() -> Self {
         Self {
             url: "http://localhost:9090".into(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LokiConfig {
+    pub url: String,
+    pub tenant_header: String,
+    pub tenant_env: String,
+    pub max_range_seconds: u64,
+    pub max_lines: u32,
+}
+
+impl Default for LokiConfig {
+    fn default() -> Self {
+        Self {
+            url: "http://localhost:3100".into(),
+            tenant_header: "X-Scope-OrgID".into(),
+            tenant_env: "LOKI_TENANT".into(),
+            max_range_seconds: 3600,
+            max_lines: 200,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TempoConfig {
+    pub url: String,
+    pub max_range_seconds: u64,
+}
+
+impl Default for TempoConfig {
+    fn default() -> Self {
+        Self {
+            url: "http://localhost:3200".into(),
+            max_range_seconds: 3600,
         }
     }
 }

@@ -7,6 +7,6 @@ pub use demo::DemoModelProvider;
 pub use fake::FakeModelProvider;
 pub use openai::OpenAIResponsesProvider;
 pub use provider::{
-    ModelEvent, ModelEventSink, ModelItem, ModelOutput, ModelProvider, ModelRequest, ModelResponse,
-    ToolSchema, Usage,
+    ModelCapabilities, ModelEvent, ModelEventSink, ModelItem, ModelOutput, ModelProvider,
+    ModelRequest, ModelResponse, ToolSchema, Usage,
 };

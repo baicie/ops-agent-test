@@ -9,6 +9,8 @@ fn runtime_defaults_match_the_mvp_safety_limits() {
     assert_eq!(config.runtime.tool_timeout_seconds, 30);
     assert_eq!(config.runtime.model_timeout_seconds, 120);
     assert_eq!(config.runtime.max_output_bytes, 64 * 1024);
+    assert_eq!(config.loki.url, "http://localhost:3100");
+    assert_eq!(config.tempo.url, "http://localhost:3200");
     assert!(!config.tools.exec);
 }
 

@@ -19,12 +19,16 @@ export type RuntimeEventType =
   | "assistant_delta"
   | "assistant_completed"
   | "tool_started"
+  | "tool_proposed"
+  | "tool_authorized"
+  | "tool_execution_started"
   | "tool_completed"
   | "approval_required"
   | "approval_resolved"
   | "turn_completed"
   | "turn_failed"
-  | "turn_cancelled";
+  | "turn_cancelled"
+  | "unknown";
 
 export interface NormalizedEvent {
   seq: number;
@@ -47,6 +51,33 @@ export interface MessageItem extends TimelineBase {
   content: string;
   streaming: boolean;
   optimistic?: boolean;
+  incidentContext?: IncidentContext | null;
+  diagnosis?: Diagnosis | null;
+}
+
+export interface IncidentContext {
+  service?: string;
+  environment?: string;
+  starts_at?: string;
+  ends_at?: string;
+  labels?: Record<string, string>;
+  annotations?: Record<string, string>;
+  source?: { kind?: string; fingerprint?: string };
+}
+
+export interface Claim {
+  claim_id?: string;
+  kind: string;
+  statement: string;
+  evidence_ids?: string[];
+  confidence?: string;
+}
+
+export interface Diagnosis {
+  summary: string;
+  claims: Claim[];
+  recommended_actions?: string[];
+  limitations?: string[];
 }
 
 export interface EvidenceMeta {
@@ -54,6 +85,11 @@ export interface EvidenceMeta {
   query?: string;
   timestamp?: string;
   duration_ms?: number;
+  evidence_id?: string;
+  summary?: string;
+  sha256?: string;
+  truncated?: boolean;
+  artifact_ref?: string;
   [key: string]: unknown;
 }
 
@@ -62,7 +98,7 @@ export interface ToolItem extends TimelineBase {
   callId: string;
   name: string;
   arguments: Record<string, unknown>;
-  status: "running" | "completed" | "failed";
+  status: "proposed" | "authorized" | "running" | "completed" | "failed";
   output?: unknown;
   evidence?: EvidenceMeta;
   durationMs?: number;
@@ -93,5 +129,7 @@ export interface OpsState {
   turnStatus: TurnStatus;
   lastSeq: number;
   error: string | null;
+  selectedEvidenceId: string | null;
+  clientUpgradeHint: string | null;
   sidebarOpen: boolean;
 }

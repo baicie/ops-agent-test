@@ -12,9 +12,25 @@ tool_timeout_seconds = 30
 model_timeout_seconds = 120
 max_output_bytes = 65536
 context_items = 100
+context_max_tokens = 24000
+context_max_bytes = 96000
+context_max_evidence = 32
+context_max_tool_calls = 24
+inline_artifact_bytes = 8192
 
 [prometheus]
 url = "http://localhost:9090"
+
+[loki]
+url = "http://localhost:3100"
+tenant_header = "X-Scope-OrgID"
+tenant_env = "LOKI_TENANT"
+max_range_seconds = 3600
+max_lines = 200
+
+[tempo]
+url = "http://localhost:3200"
+max_range_seconds = 3600
 
 [targets]
 allowed_containers = ["order-service"]

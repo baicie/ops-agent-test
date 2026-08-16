@@ -9,6 +9,7 @@ import { Sidebar } from "./components/Sidebar";
 import { Button } from "./components/ui/button";
 import { TooltipProvider } from "./components/ui/tooltip";
 import { initialState, opsReducer } from "./reducer";
+import type { IncidentContext } from "./types";
 
 interface AppProps {
   client?: OpsApiClient;
@@ -109,12 +110,15 @@ export default function App({ client = defaultApi }: AppProps) {
   }, [client, creatingThread]);
 
   const sendMessage = useCallback(
-    async (input: string) => {
+    async (input: string, incidentContext?: IncidentContext) => {
       if (!state.activeThreadId || state.turnStatus === "running") return;
       const threadId = state.activeThreadId;
-      dispatch({ type: "message/optimistic", payload: { id: newMessageId(), content: input } });
+      dispatch({
+        type: "message/optimistic",
+        payload: { id: newMessageId(), content: input, incidentContext },
+      });
       try {
-        const turn = await client.startTurn(threadId, input);
+        const turn = await client.startTurn(threadId, input, incidentContext);
         dispatch({ type: "turn/started", payload: { turnId: turn.turnId } });
       } catch (error) {
         dispatch({ type: "error/set", payload: readableError(error) });
@@ -205,10 +209,11 @@ export default function App({ client = defaultApi }: AppProps) {
             stopping={stopping}
             resolvingApprovals={resolvingApprovals}
             onNewThread={() => void createThread()}
-            onSend={(input) => void sendMessage(input)}
+            onSend={(input, incidentContext) => void sendMessage(input, incidentContext)}
             onStop={() => void stopTurn()}
             onApproval={(approvalId, approved) => void resolveApproval(approvalId, approved)}
             onDismissError={() => dispatch({ type: "error/clear" })}
+            onSelectEvidence={(evidenceId) => dispatch({ type: "evidence/select", payload: evidenceId })}
           />
         </main>
       </div>

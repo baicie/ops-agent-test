@@ -1,9 +1,12 @@
+mod connector;
 mod docker_logs;
 mod exec;
 mod fake;
 mod http;
+mod loki;
 mod promql;
 mod registry;
+mod tempo;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -17,8 +20,10 @@ pub use docker_logs::DockerLogsTool;
 pub use exec::ExecTool;
 pub use fake::FakeTool;
 pub use http::HttpGetTool;
+pub use loki::LokiLogQueryTool;
 pub use promql::PromqlTool;
 pub use registry::ToolRegistry;
+pub use tempo::{TempoTraceGetTool, TempoTraceSearchTool};
 
 pub const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
