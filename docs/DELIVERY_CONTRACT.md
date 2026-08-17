@@ -37,8 +37,17 @@ just check
 # 完整发布前门禁，包括依赖审计和 release build
 just release-check
 
+# 校验和与 SBOM（不打 tag）
+just release-dry-run
+
 # 确定性本地 UI
 just serve-fake
+
+# 运维命令、合同与场景
+just ops-test
+
+# 本地容量/配额（不含 24h soak）
+just capacity-test
 
 # Demo 启停
 just demo-up

@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
@@ -309,6 +309,95 @@ impl KubernetesClient {
             return Err(connector::http_status_error("kubernetes", status, &body));
         }
         Ok((bytes, truncated))
+    }
+
+    pub async fn get_workload(
+        &self,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+        cancellation: CancellationToken,
+    ) -> Result<Value> {
+        let kind = normalize_kind(kind);
+        if !matches!(kind.as_str(), "Deployment" | "StatefulSet") {
+            return Err(OpsCodexError::Policy(
+                "workload scale only supports Deployment or StatefulSet".into(),
+            ));
+        }
+        self.authorize(&kind, Some(namespace))?;
+        let path = resource_path(&kind, Some(namespace), Some(name))?;
+        let url = self.join(&path)?;
+        let mut object = self.send_get(url, cancellation).await?;
+        sanitize_object(&mut object);
+        Ok(object)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn patch_replicas(
+        &self,
+        kind: &str,
+        namespace: &str,
+        name: &str,
+        replicas: u32,
+        resource_version: &str,
+        operation_id: &str,
+        dry_run: bool,
+        cancellation: CancellationToken,
+    ) -> Result<Value> {
+        let kind = normalize_kind(kind);
+        if !matches!(kind.as_str(), "Deployment" | "StatefulSet") {
+            return Err(OpsCodexError::Policy(
+                "workload scale only supports Deployment or StatefulSet".into(),
+            ));
+        }
+        self.authorize(&kind, Some(namespace))?;
+        let path = resource_path(&kind, Some(namespace), Some(name))?;
+        let mut url = self.join(&path)?;
+        if dry_run {
+            url.query_pairs_mut().append_pair("dryRun", "All");
+        }
+        let body = json!({
+            "apiVersion": "apps/v1",
+            "kind": kind,
+            "metadata": {
+                "name": name,
+                "namespace": namespace,
+                "resourceVersion": resource_version,
+                "annotations": {
+                    "opscodex.io/operation-id": operation_id
+                }
+            },
+            "spec": { "replicas": replicas }
+        });
+        let mut request = self
+            .client
+            .patch(url)
+            .header("content-type", "application/strategic-merge-patch+json")
+            .json(&body);
+        if let Some(token) = &self.bearer {
+            request = request.bearer_auth(token);
+        }
+        let response = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err(OpsCodexError::Cancelled),
+            _ = tokio::time::sleep(Duration::from_secs(15)) => {
+                return Err(OpsCodexError::Timeout("kubernetes patch timed out".into()));
+            }
+            response = request.send() => {
+                response.map_err(|error| OpsCodexError::connector(ConnectorClass::Unavailable, error.to_string()))?
+            }
+        };
+        let status = response.status();
+        let (bytes, _) = crate::tools::read_bounded_body(response, cancellation, 64 * 1024).await?;
+        if !status.is_success() {
+            let body = String::from_utf8_lossy(&bytes);
+            return Err(connector::http_status_error("kubernetes", status, &body));
+        }
+        let mut object: Value = serde_json::from_slice(&bytes).map_err(|error| {
+            OpsCodexError::connector(ConnectorClass::MalformedData, error.to_string())
+        })?;
+        sanitize_object(&mut object);
+        Ok(object)
     }
 }
 

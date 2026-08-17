@@ -28,6 +28,8 @@ export default function App({ client = defaultApi }: AppProps) {
   const [creatingThread, setCreatingThread] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [resolvingApprovals, setResolvingApprovals] = useState<Set<string>>(() => new Set());
+  const [resolvingActions, setResolvingActions] = useState<Set<string>>(() => new Set());
+  const [proposing, setProposing] = useState(false);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState("default");
   const [topology, setTopology] = useState<TopologyGraph | null>(null);
@@ -270,6 +272,90 @@ export default function App({ client = defaultApi }: AppProps) {
     [client],
   );
 
+  const applyActionRecord = useCallback((record: Record<string, unknown>, seq: number) => {
+    const review =
+      record.review && typeof record.review === "object" && !Array.isArray(record.review)
+        ? (record.review as Record<string, unknown>)
+        : record;
+    dispatch({
+      type: "event/received",
+      payload: {
+        seq,
+        threadId: String(record.thread_id ?? record.threadId ?? ""),
+        turnId: null,
+        type: "action_updated",
+        data: {
+          action_id: record.action_id ?? record.actionId,
+          plan_id: record.plan_id ?? record.planId,
+          status: record.status,
+          tool: record.tool_id ?? record.tool,
+          request_hash: record.request_hash ?? record.requestHash,
+          review,
+        },
+      },
+    });
+  }, []);
+
+  const proposeRemediation = useCallback(
+    async (claimIds: string[]) => {
+      if (!state.activeThreadId) return;
+      const workspaceId = activeThread?.workspaceId ?? selectedWorkspaceId;
+      setProposing(true);
+      try {
+        const kind = workspaceId === "local-demo" ? "demo_fault_reset" : "k8s_scale";
+        const parameters =
+          kind === "demo_fault_reset"
+            ? { service: "order-service", mode: "normal" }
+            : { kind: "Deployment", namespace: "default", name: "app", replicas: 2 };
+        const record = await client.proposeActionPlan(state.activeThreadId, kind, parameters, claimIds);
+        applyActionRecord(record, state.lastSeq + 1);
+      } catch (error) {
+        dispatch({ type: "error/set", payload: readableError(error) });
+      } finally {
+        setProposing(false);
+      }
+    },
+    [activeThread?.workspaceId, applyActionRecord, client, selectedWorkspaceId, state.activeThreadId, state.lastSeq],
+  );
+
+  const approveAction = useCallback(
+    async (actionId: string, requestHash: string, approved: boolean) => {
+      setResolvingActions((current) => new Set(current).add(actionId));
+      try {
+        const record = await client.approveAction(actionId, requestHash, approved);
+        applyActionRecord(record, state.lastSeq + 1);
+      } catch (error) {
+        dispatch({ type: "error/set", payload: readableError(error) });
+      } finally {
+        setResolvingActions((current) => {
+          const next = new Set(current);
+          next.delete(actionId);
+          return next;
+        });
+      }
+    },
+    [applyActionRecord, client, state.lastSeq],
+  );
+
+  const executeAction = useCallback(
+    async (actionId: string) => {
+      setResolvingActions((current) => new Set(current).add(actionId));
+      try {
+        const record = await client.executeAction(actionId);
+        applyActionRecord(record, state.lastSeq + 1);
+      } catch (error) {
+        dispatch({ type: "error/set", payload: readableError(error) });
+      } finally {
+        setResolvingActions((current) => {
+          const next = new Set(current);
+          next.delete(actionId);
+          return next;
+        });
+      }
+    },
+    [applyActionRecord, client, state.lastSeq],
+  );
+
   const workspaceLabel = useMemo(() => {
     const workspaceId = activeThread?.workspaceId ?? selectedWorkspaceId;
     const workspace = workspaces.find((item) => item.id === workspaceId);
@@ -337,6 +423,13 @@ export default function App({ client = defaultApi }: AppProps) {
             onSend={(input, incidentContext) => void sendMessage(input, incidentContext)}
             onStop={() => void stopTurn()}
             onApproval={(approvalId, approved) => void resolveApproval(approvalId, approved)}
+            onProposeRemediation={(claimIds) => void proposeRemediation(claimIds)}
+            onApproveAction={(actionId, requestHash, approved) =>
+              void approveAction(actionId, requestHash, approved)
+            }
+            onExecuteAction={(actionId) => void executeAction(actionId)}
+            proposing={proposing}
+            resolvingActions={resolvingActions}
             onResume={() => void resumeTurn()}
             onFork={() => void forkThread()}
             onDismissError={() => dispatch({ type: "error/clear" })}

@@ -1,6 +1,5 @@
 use std::{
     io::{self, Write},
-    net::SocketAddr,
     path::PathBuf,
 };
 
@@ -25,6 +24,12 @@ pub struct Cli {
     pub config: Option<PathBuf>,
     #[arg(long, global = true)]
     pub enable_exec: bool,
+    #[arg(
+        long,
+        global = true,
+        help = "Block all change operations regardless of existing approvals"
+    )]
+    pub kill_switch: bool,
     #[arg(
         long,
         global = true,
@@ -71,10 +76,54 @@ pub enum Command {
         #[arg(long)]
         out: PathBuf,
     },
+    Doctor,
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    Storage {
+        #[command(subcommand)]
+        command: StorageCommand,
+    },
+    Audit {
+        #[command(subcommand)]
+        command: AuditCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfigCommand {
+    Validate,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum StorageCommand {
+    Verify,
+    Backup {
+        #[arg(long)]
+        out: PathBuf,
+    },
+    Export {
+        #[arg(long)]
+        thread: String,
+        #[arg(long)]
+        out: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AuditCommand {
+    Verify,
 }
 
 pub async fn execute(cli: Cli) -> Result<()> {
     let mut config = Config::load(cli.config.as_deref())?;
+    if cli.enable_exec {
+        config.tools.exec = true;
+    }
+    if cli.kill_switch {
+        config.remediation.kill_switch = true;
+    }
     match &cli.command {
         Command::Migrate { dry_run, verify } => {
             return migrate_store(&config, *dry_run, *verify).await;
@@ -82,10 +131,47 @@ pub async fn execute(cli: Cli) -> Result<()> {
         Command::Export { thread, out } => {
             return export_thread(&config, thread, out).await;
         }
+        Command::Doctor => {
+            let report = crate::ops::doctor(&config).await?;
+            crate::ops::print_json(&report)?;
+            return if report.is_ok() {
+                Ok(())
+            } else {
+                Err(OpsCodexError::Protocol(
+                    "doctor found blocking errors".into(),
+                ))
+            };
+        }
+        Command::Config {
+            command: ConfigCommand::Validate,
+        } => {
+            crate::ops::validate_config(&config)?;
+            println!("ok");
+            return Ok(());
+        }
+        Command::Storage { command } => {
+            return match command {
+                StorageCommand::Verify => {
+                    let detail = crate::ops::verify_store(&config).await?;
+                    println!("{detail}");
+                    Ok(())
+                }
+                StorageCommand::Backup { out } => {
+                    let path = crate::ops::backup_store(&config, out).await?;
+                    println!("backup {}", path.display());
+                    Ok(())
+                }
+                StorageCommand::Export { thread, out } => export_thread(&config, thread, out).await,
+            };
+        }
+        Command::Audit {
+            command: AuditCommand::Verify,
+        } => {
+            let detail = crate::ops::verify_audit(&config).await?;
+            println!("{detail}");
+            return Ok(());
+        }
         _ => {}
-    }
-    if cli.enable_exec {
-        config.tools.exec = true;
     }
     config.validate()?;
     let runtime = build_runtime(&config, cli.fake_model).await?;
@@ -114,7 +200,12 @@ pub async fn execute(cli: Cli) -> Result<()> {
             )
             .await
         }
-        Command::Migrate { .. } | Command::Export { .. } => unreachable!(),
+        Command::Migrate { .. }
+        | Command::Export { .. }
+        | Command::Doctor
+        | Command::Config { .. }
+        | Command::Storage { .. }
+        | Command::Audit { .. } => unreachable!(),
     }
 }
 
@@ -316,9 +407,7 @@ async fn serve(
     port: u16,
     web_directory: PathBuf,
 ) -> Result<()> {
-    let address: SocketAddr = format!("{host}:{port}")
-        .parse()
-        .map_err(|error| OpsCodexError::Protocol(format!("invalid listen address: {error}")))?;
+    let address = crate::ops::parse_listen_addr(&host, port)?;
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .map_err(|error| OpsCodexError::Protocol(format!("failed to bind {address}: {error}")))?;

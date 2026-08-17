@@ -14,6 +14,8 @@ fn runtime_defaults_match_the_mvp_safety_limits() {
     assert!(!config.tools.exec);
     assert_eq!(config.store.backend, "sqlite");
     assert_eq!(config.store.approval_ttl_seconds, 3600);
+    assert!(!config.remediation.enabled);
+    assert!(!config.remediation.kill_switch);
 }
 
 #[test]
@@ -130,4 +132,31 @@ fn extensions_and_skills_are_parsed_and_default_to_disabled_custom_tools() -> an
     .unwrap_err();
     assert!(duplicate.to_string().contains("duplicate extension"));
     Ok(())
+}
+
+#[test]
+fn remediation_demo_url_must_be_loopback() {
+    let error =
+        Config::from_toml("[remediation]\ndemo_fault_url = \"http://example.com\"").unwrap_err();
+    assert!(error.to_string().contains("loopback"));
+}
+
+#[test]
+fn non_loopback_server_host_is_rejected_without_tls() {
+    let error = Config::from_toml("[server]\nhost = \"0.0.0.0\"").unwrap_err();
+    assert!(error.to_string().contains("loopback"));
+}
+
+#[test]
+fn production_safe_cannot_enable_exec() {
+    let error = Config::from_toml(
+        r#"
+        [tools]
+        exec = true
+        [extensions]
+        production_safe = true
+        "#,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("production_safe"));
 }

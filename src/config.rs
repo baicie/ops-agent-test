@@ -21,6 +21,7 @@ pub struct Config {
     pub extension: Vec<ExtensionConfigEntry>,
     pub skills: Vec<SkillConfigEntry>,
     pub store: StoreConfig,
+    pub remediation: RemediationConfig,
 }
 
 impl Config {
@@ -141,6 +142,25 @@ impl Config {
                     .into(),
             ));
         }
+        if self.remediation.approval_ttl_seconds == 0 {
+            return Err(OpsCodexError::Protocol(
+                "remediation.approval_ttl_seconds must be greater than zero".into(),
+            ));
+        }
+        let demo_url = url::Url::parse(&self.remediation.demo_fault_url).map_err(|error| {
+            OpsCodexError::Protocol(format!("invalid remediation.demo_fault_url: {error}"))
+        })?;
+        if !matches!(demo_url.host_str(), Some("127.0.0.1" | "localhost" | "::1")) {
+            return Err(OpsCodexError::Protocol(
+                "remediation.demo_fault_url must be a loopback host".into(),
+            ));
+        }
+        if !crate::config::is_loopback_bind_host(&self.server.host) {
+            return Err(OpsCodexError::Protocol(
+                "without TLS, server.host must be a loopback address (127.0.0.1, localhost, or ::1)"
+                    .into(),
+            ));
+        }
         if !matches!(self.store.backend.as_str(), "sqlite" | "jsonl") {
             return Err(OpsCodexError::Protocol(format!(
                 "store.backend must be sqlite or jsonl, not `{}`",
@@ -187,8 +207,35 @@ impl Config {
                 )));
             }
         }
+        if self.extensions.production_safe && self.tools.exec {
+            return Err(OpsCodexError::Protocol(
+                "extensions.production_safe cannot be combined with tools.exec".into(),
+            ));
+        }
         Ok(())
     }
+
+    pub fn sqlite_path(&self) -> PathBuf {
+        self.store
+            .sqlite_path
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Self::data_dir().join("state.sqlite3"))
+    }
+
+    pub fn artifact_dir(&self) -> PathBuf {
+        Self::data_dir().join("artifacts")
+    }
+}
+
+pub fn is_loopback_bind_host(host: &str) -> bool {
+    let host = host.trim().trim_matches(|ch| ch == '[' || ch == ']');
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -363,6 +410,7 @@ pub struct WorkspaceConfigEntry {
     pub runbook_dir: Option<String>,
     pub max_concurrent_turns: Option<usize>,
     pub max_effect: Option<String>,
+    pub allow_remediation: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -469,6 +517,26 @@ impl Default for StoreConfig {
             jsonl_dir: None,
             approval_ttl_seconds: 3600,
             lease_ttl_seconds: 30,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemediationConfig {
+    pub enabled: bool,
+    pub kill_switch: bool,
+    pub demo_fault_url: String,
+    pub approval_ttl_seconds: u64,
+}
+
+impl Default for RemediationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            kill_switch: false,
+            demo_fault_url: "http://127.0.0.1:8080".into(),
+            approval_ttl_seconds: 1800,
         }
     }
 }

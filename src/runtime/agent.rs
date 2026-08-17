@@ -14,7 +14,7 @@ use crate::{
     config::RuntimeSettings,
     evidence::{
         ArtifactStore, EvidenceIds, apply_citation_limitations, finalize_evidence,
-        model_tool_output, parse_diagnosis, redact_json, validate_diagnosis,
+        model_tool_output, parse_diagnosis, redact_json,
     },
     extensions::{ExtensionCatalog, SkillCatalog},
     model::{ModelEvent, ModelOutput, ModelProvider, ModelRequest, ModelResponse},
@@ -30,6 +30,7 @@ use crate::{
     },
     telemetry::RuntimeMetrics,
     tools::{ToolInvocation, ToolOutput, ToolRegistry},
+    topology::artifact_topology_projection,
     workspace::WorkspaceCatalog,
 };
 
@@ -49,6 +50,7 @@ Rules:
 7. Incident context is unverified. Confirm every statement with tools.
 8. Keep investigating until you can provide a useful diagnosis or a clear abstain.
 9. Stay inside the current Workspace. Kubernetes, topology and runbook tools are read-only references.
+10. Do not change the environment. Structured ActionPlan remediation is proposed out of band; never treat exec, MCP, or custom tools as remediation.
 
 Successful tool results include an evidence_id. Final answers MUST be a JSON object:
 {
@@ -68,6 +70,7 @@ observed and inferred claims must cite evidence_id values from tool results.
 "#;
 
 const INLINE_ARTIFACT_BYTES: usize = 8 * 1024;
+const MAX_TURN_INPUT_BYTES: usize = 32 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeConfig {
@@ -138,10 +141,10 @@ enum TurnStart {
 pub struct AgentRuntime {
     model: Arc<dyn ModelProvider>,
     tools: ToolRegistry,
-    workspaces: Arc<WorkspaceCatalog>,
+    pub(crate) workspaces: Arc<WorkspaceCatalog>,
     workspace_tools: Arc<HashMap<String, ToolRegistry>>,
-    policy: PolicyEngine,
-    store: Arc<dyn EventStore>,
+    pub(crate) policy: PolicyEngine,
+    pub(crate) store: Arc<dyn EventStore>,
     artifacts: Arc<ArtifactStore>,
     metrics: Arc<RuntimeMetrics>,
     config: RuntimeConfig,
@@ -151,6 +154,7 @@ pub struct AgentRuntime {
     workspace_skills: Arc<HashMap<String, SkillCatalog>>,
     skill_budget_bytes: usize,
     owner_id: String,
+    pub(crate) remediation: Arc<crate::runtime::remediation::RemediationRuntime>,
 }
 
 impl AgentRuntime {
@@ -177,6 +181,7 @@ impl AgentRuntime {
             workspace_skills: Arc::new(HashMap::new()),
             skill_budget_bytes: 4 * 1024,
             owner_id: uuid::Uuid::now_v7().to_string(),
+            remediation: Arc::new(crate::runtime::remediation::RemediationRuntime::disabled()),
         }
     }
 
@@ -212,6 +217,14 @@ impl AgentRuntime {
     ) -> Self {
         self.workspace_skills = Arc::new(skills);
         self.skill_budget_bytes = skill_budget_bytes.max(128);
+        self
+    }
+
+    pub fn with_remediation(
+        mut self,
+        remediation: crate::runtime::remediation::RemediationRuntime,
+    ) -> Self {
+        self.remediation = Arc::new(remediation);
         self
     }
 
@@ -274,6 +287,40 @@ impl AgentRuntime {
                 approval.status = ApprovalStatus::Expired;
                 self.store.put_approval(approval).await?;
             }
+        }
+        for mut action in self.store.list_action_recovery_candidates().await? {
+            let next = match action.status {
+                crate::action::ActionStatus::AwaitingApproval
+                | crate::action::ActionStatus::Authorized
+                    if action.expires_at <= now =>
+                {
+                    crate::action::ActionStatus::Expired
+                }
+                crate::action::ActionStatus::PreconditionCheck
+                | crate::action::ActionStatus::Executing
+                | crate::action::ActionStatus::Verifying => {
+                    crate::action::ActionStatus::NeedsReconciliation
+                }
+                _ => continue,
+            };
+            action.status = crate::action::transition(action.status, next)?;
+            action.updated_at = now;
+            self.store.put_action(action.clone()).await?;
+            let _ = self
+                .store
+                .append(
+                    &action.thread_id,
+                    None,
+                    RuntimeEvent::ActionUpdated {
+                        action_id: action.action_id.clone(),
+                        plan_id: action.plan_id.clone(),
+                        status: action.status.as_str().to_owned(),
+                        tool: action.tool_id.clone(),
+                        request_hash: action.request_hash.clone(),
+                        review: action.review_summary(),
+                    },
+                )
+                .await;
         }
         let mut reports = Vec::new();
         for turn in self.store.list_open_turns().await? {
@@ -441,6 +488,21 @@ impl AgentRuntime {
         events: broadcast::Sender<EventEnvelope>,
         cancellation: CancellationToken,
     ) -> Result<()> {
+        if let Some(context) = &input.incident_context {
+            context.validate()?;
+        }
+        if input.content.len() > MAX_TURN_INPUT_BYTES {
+            return Err(OpsCodexError::Protocol(format!(
+                "turn input exceeds {MAX_TURN_INPUT_BYTES} bytes; shorten the prompt"
+            )));
+        }
+        if input.content.len() > self.config.context.max_bytes {
+            return Err(OpsCodexError::Protocol(format!(
+                "turn input exceeds context budget ({} bytes > {} bytes); shorten the prompt or raise runtime.context_max_bytes",
+                input.content.len(),
+                self.config.context.max_bytes
+            )));
+        }
         let turn_started = Instant::now();
         RuntimeMetrics::inc(&self.metrics.turns_started);
         let result = async {
@@ -1238,6 +1300,11 @@ impl AgentRuntime {
                 },
             );
             model_content = model_tool_output(true, &evidence, &content);
+            if evidence.artifact_ref.is_some()
+                && let Some(projection) = artifact_topology_projection(&name, &content)
+            {
+                model_content["topology_projection"] = projection;
+            }
         }
         let event_id = self
             .emit(
@@ -1583,8 +1650,7 @@ fn finalize_turn_diagnosis(
             _ => None,
         })
         .collect();
-    let errors = validate_diagnosis(&diagnosis, &evidence);
-    apply_citation_limitations(diagnosis, &errors)
+    apply_citation_limitations(diagnosis, &evidence)
 }
 
 fn compose_instructions(

@@ -1,3 +1,4 @@
+pub mod action;
 pub mod app;
 pub mod cli;
 pub mod config;
@@ -5,6 +6,7 @@ pub mod error;
 pub mod evidence;
 pub mod extensions;
 pub mod model;
+pub mod ops;
 pub mod policy;
 pub mod runbook;
 pub mod runtime;

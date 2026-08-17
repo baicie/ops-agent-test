@@ -6,16 +6,20 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use sha2::{Digest, Sha256};
 
 use crate::{
     OpsCodexError, Result,
+    action::{
+        ActionPlan, ActionRecord, ActionStatus, AuditRecord, action_request_hash,
+        audit_record_hash, transition,
+    },
     evidence::EvidenceMeta,
     model::ModelItem,
     runtime::{
-        ApprovalId, ContextBudget, EventEnvelope, EvidenceId, RuntimeEvent, StreamKind, Thread,
-        ThreadId, ThreadStatus, TurnId, TurnStatus, WorkspaceId,
+        ActionId, ApprovalId, ContextBudget, EventEnvelope, EvidenceId, RuntimeEvent, StreamKind,
+        Thread, ThreadId, ThreadStatus, TurnId, TurnStatus, WorkspaceId,
     },
     store::{
         AppendEvent, ApprovalStatus, CheckpointPhase, CheckpointRecord, DurableApproval,
@@ -125,6 +129,39 @@ CREATE TABLE IF NOT EXISTS resume_ops (
 );
 "#;
 
+pub const SCHEMA_V2_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS action_plans (
+    plan_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS actions (
+    action_id TEXT PRIMARY KEY,
+    plan_id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    operation_id TEXT NOT NULL UNIQUE,
+    consumed_approval INTEGER NOT NULL DEFAULT 0,
+    payload TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_actions_thread ON actions(thread_id);
+CREATE TABLE IF NOT EXISTS audit_log (
+    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_hash TEXT NOT NULL,
+    previous_hash TEXT NOT NULL,
+    actor TEXT NOT NULL,
+    workspace_id TEXT,
+    operation TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+"#;
+
 struct StoreLock {
     _file: File,
 }
@@ -158,6 +195,82 @@ impl SqliteStore {
 
     pub fn path(&self) -> &Path {
         &self.inner.path
+    }
+
+    pub async fn integrity_check(&self) -> Result<()> {
+        self.with_conn(|conn| {
+            let result: String = conn
+                .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+                .map_err(|error| sqlite_error("integrity_check", error))?;
+            if result != "ok" {
+                return Err(OpsCodexError::Storage(format!(
+                    "sqlite integrity_check failed: {result}"
+                )));
+            }
+            let mut foreign_keys = conn
+                .prepare("PRAGMA foreign_key_check")
+                .map_err(|error| sqlite_error("foreign_key_check", error))?;
+            let mut rows = foreign_keys
+                .query([])
+                .map_err(|error| sqlite_error("foreign_key_check query", error))?;
+            if rows
+                .next()
+                .map_err(|error| sqlite_error("foreign_key_check row", error))?
+                .is_some()
+            {
+                return Err(OpsCodexError::Storage(
+                    "sqlite foreign key check failed".into(),
+                ));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub async fn applied_schema_versions(&self) -> Result<Vec<i64>> {
+        self.with_conn(|conn| {
+            let mut statement = conn
+                .prepare("SELECT version FROM schema_migrations ORDER BY version")
+                .map_err(|error| sqlite_error("schema versions", error))?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, i64>(0))
+                .map_err(|error| sqlite_error("schema versions query", error))?;
+            let mut versions = Vec::new();
+            for row in rows {
+                versions.push(row.map_err(|error| sqlite_error("schema versions row", error))?);
+            }
+            Ok(versions)
+        })
+        .await
+    }
+
+    pub async fn backup_to(&self, dest: impl Into<PathBuf>) -> Result<PathBuf> {
+        let dest = dest.into();
+        prepare_backup_destination(&dest).await?;
+        let backup_path = dest.clone();
+        self.with_conn(move |conn| vacuum_into(conn, &backup_path))
+            .await?;
+        Ok(dest)
+    }
+
+    pub async fn backup_path(
+        source: impl Into<PathBuf>,
+        dest: impl Into<PathBuf>,
+    ) -> Result<PathBuf> {
+        let source = source.into();
+        let dest = dest.into();
+        prepare_backup_destination(&dest).await?;
+        tokio::task::spawn_blocking(move || {
+            let conn =
+                Connection::open_with_flags(&source, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .map_err(|error| sqlite_error("open backup source", error))?;
+            conn.busy_timeout(Duration::from_millis(5_000))
+                .map_err(|error| sqlite_error("backup busy_timeout", error))?;
+            vacuum_into(&conn, &dest)?;
+            Ok(dest)
+        })
+        .await
+        .map_err(|error| OpsCodexError::Storage(format!("sqlite backup join failed: {error}")))?
     }
 
     async fn with_conn<T, F>(&self, function: F) -> Result<T>
@@ -235,6 +348,31 @@ impl SqliteStore {
     }
 }
 
+async fn prepare_backup_destination(dest: &Path) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent).await.map_err(|error| {
+            OpsCodexError::Storage(format!(
+                "failed to create backup directory {}: {error}",
+                parent.display()
+            ))
+        })?;
+    }
+    if dest.exists() {
+        return Err(OpsCodexError::Storage(format!(
+            "backup path {} already exists",
+            dest.display()
+        )));
+    }
+    Ok(())
+}
+
+fn vacuum_into(conn: &Connection, dest: &Path) -> Result<()> {
+    let dest_display = dest.display().to_string();
+    conn.execute("VACUUM INTO ?1", params![dest_display])
+        .map_err(|error| sqlite_error("vacuum into", error))?;
+    Ok(())
+}
+
 fn open_blocking(path: PathBuf) -> Result<SqliteStore> {
     let lock = acquire_lock(&path)?;
     let conn = Connection::open(&path).map_err(|error| sqlite_error("open", error))?;
@@ -294,36 +432,68 @@ fn try_exclusive_lock(file: &File) -> Result<()> {
 }
 
 fn apply_schema(conn: &Connection) -> Result<()> {
-    let checksum = schema_checksum();
     conn.execute_batch(SCHEMA_SQL)
         .map_err(|error| sqlite_error("schema", error))?;
-    let applied: Option<String> = conn
-        .query_row(
-            "SELECT checksum FROM schema_migrations WHERE version = ?1",
-            params![SCHEMA_VERSION],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|error| sqlite_error("schema_migrations", error))?;
-    match applied {
+    record_or_verify_migration(conn, SCHEMA_VERSION, SCHEMA_SQL)?;
+    apply_if_missing(conn, 2, SCHEMA_V2_SQL)?;
+    Ok(())
+}
+
+fn migration_checksum(sql: &str) -> String {
+    Sha256::digest(sql.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn record_or_verify_migration(conn: &Connection, version: i64, sql: &str) -> Result<()> {
+    let checksum = migration_checksum(sql);
+    match migration_checksum_applied(conn, version)? {
+        Some(existing) if existing == checksum => Ok(()),
+        Some(_) => Err(OpsCodexError::Storage(
+            "sqlite schema checksum mismatch; refusing to start".into(),
+        )),
+        None => insert_migration(conn, version, &checksum),
+    }
+}
+
+fn apply_if_missing(conn: &Connection, version: i64, sql: &str) -> Result<()> {
+    let checksum = migration_checksum(sql);
+    match migration_checksum_applied(conn, version)? {
         Some(existing) if existing == checksum => Ok(()),
         Some(_) => Err(OpsCodexError::Storage(
             "sqlite schema checksum mismatch; refusing to start".into(),
         )),
         None => {
-            conn.execute(
-                "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?1, ?2, ?3)",
-                params![SCHEMA_VERSION, checksum, Utc::now().to_rfc3339()],
-            )
-            .map_err(|error| sqlite_error("schema_migrations insert", error))?;
-            Ok(())
+            conn.execute_batch(sql)
+                .map_err(|error| sqlite_error("schema", error))?;
+            insert_migration(conn, version, &checksum)
         }
     }
 }
 
+fn migration_checksum_applied(conn: &Connection, version: i64) -> Result<Option<String>> {
+    conn.query_row(
+        "SELECT checksum FROM schema_migrations WHERE version = ?1",
+        params![version],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|error| sqlite_error("schema_migrations", error))
+}
+
+fn insert_migration(conn: &Connection, version: i64, checksum: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO schema_migrations(version, checksum, applied_at) VALUES (?1, ?2, ?3)",
+        params![version, checksum, Utc::now().to_rfc3339()],
+    )
+    .map_err(|error| sqlite_error("schema_migrations insert", error))?;
+    Ok(())
+}
+
+#[allow(dead_code)]
 pub fn schema_checksum() -> String {
-    let digest = Sha256::digest(SCHEMA_SQL.as_bytes());
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    migration_checksum(SCHEMA_SQL)
 }
 
 fn append_event(conn: &mut Connection, command: AppendEvent) -> Result<EventEnvelope> {
@@ -828,7 +998,28 @@ fn parse_turn_status(value: &str) -> TurnStatus {
 }
 
 fn sqlite_error(action: &str, error: rusqlite::Error) -> OpsCodexError {
-    OpsCodexError::Storage(format!("sqlite {action} failed: {error}"))
+    if is_sqlite_disk_full(&error) {
+        OpsCodexError::Storage(format!(
+            "sqlite {action} failed: disk is full; free space and retry ({error})"
+        ))
+    } else {
+        OpsCodexError::Storage(format!("sqlite {action} failed: {error}"))
+    }
+}
+
+fn is_sqlite_disk_full(error: &rusqlite::Error) -> bool {
+    match error {
+        rusqlite::Error::SqliteFailure(ffi_error, _)
+            if ffi_error.code == rusqlite::ErrorCode::DiskFull
+                || ffi_error.extended_code == rusqlite::ffi::SQLITE_FULL =>
+        {
+            true
+        }
+        _ => error
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("database or disk is full"),
+    }
 }
 
 fn upsert_turn(conn: &Connection, record: TurnRecord) -> Result<()> {
@@ -1243,6 +1434,279 @@ fn remember_resume(
     Ok(None)
 }
 
+fn put_action_plan(conn: &Connection, plan: ActionPlan) -> Result<()> {
+    let payload = serde_json::to_string(&plan).map_err(|error| {
+        OpsCodexError::Storage(format!("failed to encode action plan: {error}"))
+    })?;
+    conn.execute(
+        "INSERT INTO action_plans(plan_id, workspace_id, thread_id, payload, created_at, expires_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(plan_id) DO UPDATE SET
+            payload = excluded.payload,
+            expires_at = excluded.expires_at",
+        params![
+            plan.plan_id.to_string(),
+            plan.workspace_id.as_str(),
+            plan.thread_id.to_string(),
+            payload,
+            plan.created_at.to_rfc3339(),
+            plan.expires_at.to_rfc3339()
+        ],
+    )
+    .map_err(|error| sqlite_error("put action plan", error))?;
+    Ok(())
+}
+
+fn put_action(conn: &Connection, action: ActionRecord) -> Result<()> {
+    let payload = serde_json::to_string(&action)
+        .map_err(|error| OpsCodexError::Storage(format!("failed to encode action: {error}")))?;
+    conn.execute(
+        "INSERT INTO actions(action_id, plan_id, thread_id, status, request_hash, operation_id, consumed_approval, payload, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(action_id) DO UPDATE SET
+            status = excluded.status,
+            request_hash = excluded.request_hash,
+            consumed_approval = excluded.consumed_approval,
+            payload = excluded.payload,
+            updated_at = excluded.updated_at",
+        params![
+            action.action_id.to_string(),
+            action.plan_id.to_string(),
+            action.thread_id.to_string(),
+            action.status.as_str(),
+            action.request_hash,
+            action.operation_id,
+            i64::from(action.consumed_approval),
+            payload,
+            action.updated_at.to_rfc3339()
+        ],
+    )
+    .map_err(|error| sqlite_error("put action", error))?;
+    Ok(())
+}
+
+fn decode_action(payload: String) -> Result<ActionRecord> {
+    serde_json::from_str(&payload)
+        .map_err(|error| OpsCodexError::Storage(format!("invalid action payload: {error}")))
+}
+
+fn get_action(conn: &Connection, action_id: &ActionId) -> Result<Option<ActionRecord>> {
+    conn.query_row(
+        "SELECT payload FROM actions WHERE action_id = ?1",
+        params![action_id.to_string()],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(|error| sqlite_error("get action", error))?
+    .map(decode_action)
+    .transpose()
+}
+
+fn claim_action_for_execution(
+    conn: &mut Connection,
+    action_id: &ActionId,
+    now: DateTime<Utc>,
+) -> Result<Option<ActionRecord>> {
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| sqlite_error("begin action claim", error))?;
+    let Some(mut action) = get_action(&tx, action_id)? else {
+        return Err(OpsCodexError::NotFound(format!("action {action_id}")));
+    };
+    if action.status != ActionStatus::Authorized {
+        return Ok(None);
+    }
+    if action.expires_at <= now {
+        action.status = transition(ActionStatus::Authorized, ActionStatus::Expired)?;
+        action.updated_at = now;
+        update_action_status_cas(&tx, &action, ActionStatus::Authorized)?;
+        tx.commit()
+            .map_err(|error| sqlite_error("commit expired action", error))?;
+        return Ok(None);
+    }
+    if !action.consumed_approval {
+        return Ok(None);
+    }
+    if action_request_hash(&action) != action.request_hash {
+        return Err(OpsCodexError::Policy(
+            "action changed after approval".into(),
+        ));
+    }
+    action.status = transition(ActionStatus::Authorized, ActionStatus::PreconditionCheck)?;
+    action.updated_at = now;
+    let claimed = update_action_status_cas(&tx, &action, ActionStatus::Authorized)?;
+    tx.commit()
+        .map_err(|error| sqlite_error("commit action claim", error))?;
+    Ok(claimed.then_some(action))
+}
+
+fn update_action_status_cas(
+    conn: &Connection,
+    action: &ActionRecord,
+    expected: ActionStatus,
+) -> Result<bool> {
+    let payload = serde_json::to_string(action)
+        .map_err(|error| OpsCodexError::Storage(format!("failed to encode action: {error}")))?;
+    let updated = conn
+        .execute(
+            "UPDATE actions
+             SET status = ?2, request_hash = ?3, consumed_approval = ?4, payload = ?5, updated_at = ?6
+             WHERE action_id = ?1 AND status = ?7",
+            params![
+                action.action_id.to_string(),
+                action.status.as_str(),
+                action.request_hash,
+                i64::from(action.consumed_approval),
+                payload,
+                action.updated_at.to_rfc3339(),
+                expected.as_str()
+            ],
+        )
+        .map_err(|error| sqlite_error("compare-and-swap action status", error))?;
+    Ok(updated == 1)
+}
+
+fn list_actions_for_thread(conn: &Connection, thread_id: &ThreadId) -> Result<Vec<ActionRecord>> {
+    let mut statement = conn
+        .prepare("SELECT payload FROM actions WHERE thread_id = ?1 ORDER BY updated_at ASC")
+        .map_err(|error| sqlite_error("list actions", error))?;
+    let rows = statement
+        .query_map(params![thread_id.to_string()], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|error| sqlite_error("list actions query", error))?;
+    let mut actions = Vec::new();
+    for row in rows {
+        actions.push(decode_action(
+            row.map_err(|error| sqlite_error("list actions row", error))?,
+        )?);
+    }
+    Ok(actions)
+}
+
+fn list_awaiting_approval_actions(conn: &Connection) -> Result<Vec<ActionRecord>> {
+    let mut statement = conn
+        .prepare("SELECT payload FROM actions WHERE status = 'awaiting_approval'")
+        .map_err(|error| sqlite_error("list awaiting actions", error))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| sqlite_error("list awaiting actions query", error))?;
+    let mut actions = Vec::new();
+    for row in rows {
+        actions.push(decode_action(row.map_err(|error| {
+            sqlite_error("list awaiting actions row", error)
+        })?)?);
+    }
+    Ok(actions)
+}
+
+fn list_action_recovery_candidates(conn: &Connection) -> Result<Vec<ActionRecord>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT payload FROM actions
+             WHERE status IN ('awaiting_approval', 'authorized', 'precondition_check', 'executing', 'verifying')",
+        )
+        .map_err(|error| sqlite_error("list action recovery candidates", error))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| sqlite_error("list action recovery candidates query", error))?;
+    let mut actions = Vec::new();
+    for row in rows {
+        actions.push(decode_action(row.map_err(|error| {
+            sqlite_error("list action recovery candidates row", error)
+        })?)?);
+    }
+    Ok(actions)
+}
+
+fn append_audit(
+    conn: &Connection,
+    actor: &str,
+    workspace_id: Option<&str>,
+    operation: &str,
+    summary: serde_json::Value,
+) -> Result<()> {
+    let previous: String = conn
+        .query_row(
+            "SELECT record_hash FROM audit_log ORDER BY seq DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| sqlite_error("audit previous", error))?
+        .unwrap_or_else(|| "genesis".to_owned());
+    let created_at = Utc::now();
+    let record_hash = audit_record_hash(
+        &previous,
+        actor,
+        workspace_id,
+        operation,
+        &summary,
+        created_at,
+    );
+    let payload = serde_json::to_string(&summary)
+        .map_err(|error| OpsCodexError::Storage(format!("failed to encode audit: {error}")))?;
+    conn.execute(
+        "INSERT INTO audit_log(record_hash, previous_hash, actor, workspace_id, operation, payload, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            record_hash,
+            previous,
+            actor,
+            workspace_id,
+            operation,
+            payload,
+            created_at.to_rfc3339()
+        ],
+    )
+    .map_err(|error| sqlite_error("append audit", error))?;
+    Ok(())
+}
+
+fn list_audit(conn: &Connection) -> Result<Vec<AuditRecord>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT seq, record_hash, previous_hash, actor, workspace_id, operation, payload, created_at
+             FROM audit_log ORDER BY seq ASC",
+        )
+        .map_err(|error| sqlite_error("list audit", error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })
+        .map_err(|error| sqlite_error("list audit query", error))?;
+    let mut records = Vec::new();
+    for row in rows {
+        let (seq, record_hash, previous_hash, actor, workspace_id, operation, payload, created_at) =
+            row.map_err(|error| sqlite_error("list audit row", error))?;
+        let summary: serde_json::Value = serde_json::from_str(&payload)
+            .map_err(|error| OpsCodexError::Storage(format!("invalid audit payload: {error}")))?;
+        let created_at = DateTime::parse_from_rfc3339(&created_at)
+            .map_err(|error| OpsCodexError::Storage(format!("invalid audit timestamp: {error}")))?
+            .with_timezone(&Utc);
+        records.push(AuditRecord {
+            seq,
+            record_hash,
+            previous_hash,
+            actor,
+            workspace_id,
+            operation,
+            summary,
+            created_at,
+        });
+    }
+    Ok(records)
+}
+
 #[async_trait::async_trait]
 impl EventStore for SqliteStore {
     async fn create_thread(
@@ -1492,16 +1956,79 @@ impl EventStore for SqliteStore {
         })
         .await
     }
+
+    async fn put_action_plan(&self, plan: ActionPlan) -> Result<()> {
+        self.with_conn(move |conn| put_action_plan(conn, plan))
+            .await
+    }
+
+    async fn get_action(&self, action_id: &ActionId) -> Result<Option<ActionRecord>> {
+        let action_id = action_id.clone();
+        self.with_conn(move |conn| get_action(conn, &action_id))
+            .await
+    }
+
+    async fn put_action(&self, action: ActionRecord) -> Result<()> {
+        self.with_conn(move |conn| put_action(conn, action)).await
+    }
+
+    async fn claim_action_for_execution(
+        &self,
+        action_id: &ActionId,
+        now: DateTime<Utc>,
+    ) -> Result<Option<ActionRecord>> {
+        let action_id = action_id.clone();
+        self.with_conn(move |conn| claim_action_for_execution(conn, &action_id, now))
+            .await
+    }
+
+    async fn list_actions_for_thread(&self, thread_id: &ThreadId) -> Result<Vec<ActionRecord>> {
+        let thread_id = thread_id.clone();
+        self.with_conn(move |conn| list_actions_for_thread(conn, &thread_id))
+            .await
+    }
+
+    async fn list_awaiting_approval_actions(&self) -> Result<Vec<ActionRecord>> {
+        self.with_conn(|conn| list_awaiting_approval_actions(conn))
+            .await
+    }
+
+    async fn list_action_recovery_candidates(&self) -> Result<Vec<ActionRecord>> {
+        self.with_conn(|conn| list_action_recovery_candidates(conn))
+            .await
+    }
+
+    async fn append_audit(
+        &self,
+        actor: &str,
+        workspace_id: Option<&str>,
+        operation: &str,
+        summary: serde_json::Value,
+    ) -> Result<()> {
+        let actor = actor.to_owned();
+        let workspace_id = workspace_id.map(ToOwned::to_owned);
+        let operation = operation.to_owned();
+        self.with_conn(move |conn| {
+            append_audit(conn, &actor, workspace_id.as_deref(), &operation, summary)
+        })
+        .await
+    }
+
+    async fn list_audit(&self) -> Result<Vec<AuditRecord>> {
+        self.with_conn(|conn| list_audit(conn)).await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::time::Duration;
     use tempfile::tempdir;
 
     #[tokio::test]
     async fn schema_checksum_mismatch_refuses_start() {
+        assert_eq!(schema_checksum().len(), 64);
         let directory = tempdir().unwrap();
         let path = directory.path().join("state.sqlite3");
         let store = SqliteStore::open(&path).await.unwrap();
@@ -1565,5 +2092,49 @@ mod tests {
             )
             .await
             .unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn audit_hash_chain_detects_payload_tamper() {
+        let directory = tempdir().unwrap();
+        let store = SqliteStore::open(directory.path().join("state.sqlite3"))
+            .await
+            .unwrap();
+        store
+            .append_audit(
+                "operator",
+                Some("local-demo"),
+                "action.authorized",
+                json!({"ok": true}),
+            )
+            .await
+            .unwrap();
+        crate::action::verify_audit_chain(&store.list_audit().await.unwrap()).unwrap();
+        drop(store);
+        let conn = Connection::open(directory.path().join("state.sqlite3")).unwrap();
+        conn.execute("UPDATE audit_log SET payload = '{\"ok\":false}'", [])
+            .unwrap();
+        drop(conn);
+        let store = SqliteStore::open(directory.path().join("state.sqlite3"))
+            .await
+            .unwrap();
+        let error =
+            crate::action::verify_audit_chain(&store.list_audit().await.unwrap()).unwrap_err();
+        assert!(error.to_string().contains("hash"));
+    }
+
+    #[test]
+    fn disk_full_errors_ask_the_operator_to_free_space() {
+        let error = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: rusqlite::ErrorCode::DiskFull,
+                extended_code: rusqlite::ffi::SQLITE_FULL,
+            },
+            Some("database or disk is full".into()),
+        );
+        let mapped = sqlite_error("append", error);
+        let text = mapped.to_string();
+        assert!(text.contains("disk is full"));
+        assert!(text.contains("free space"));
     }
 }

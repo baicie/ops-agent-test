@@ -1,4 +1,5 @@
 import type {
+  ActionItem,
   ApprovalItem,
   Diagnosis,
   EvidenceMeta,
@@ -424,6 +425,47 @@ function applyRuntimeEvent(state: OpsState, event: NormalizedEvent): OpsState {
           },
         ],
       };
+    }
+
+    case "action_updated": {
+      const actionId =
+        stringValue(event.data.action_id) ?? stringValue(event.data.actionId) ?? `action:${event.seq}`;
+      const status = stringValue(event.data.status) ?? "proposed";
+      const review = recordValue(event.data.review);
+      const requestHash =
+        stringValue(event.data.request_hash) ??
+        stringValue(event.data.requestHash) ??
+        stringValue(review.request_hash) ??
+        "";
+      const existingIndex = base.items.findIndex(
+        (item) => item.kind === "action" && item.actionId === actionId,
+      );
+      const item: ActionItem = {
+        id: existingIndex >= 0 ? base.items[existingIndex].id : `action:${actionId}`,
+        kind: "action",
+        actionId,
+        planId: stringValue(event.data.plan_id) ?? stringValue(event.data.planId) ?? "",
+        tool: toolName(event.data),
+        status,
+        requestHash,
+        review,
+        turnId: event.turnId,
+        timestamp: event.timestamp,
+      };
+      const items = [...base.items];
+      if (existingIndex >= 0) {
+        items[existingIndex] = item;
+      } else {
+        items.push(item);
+      }
+      const next = { ...base, items };
+      if (status === "needs_reconciliation") {
+        return withThreadStatus({ ...next, turnStatus: "needs_reconciliation" }, "needs_reconciliation");
+      }
+      if (status === "awaiting_approval") {
+        return withThreadStatus(next, "waiting_approval");
+      }
+      return next;
     }
 
     default: {

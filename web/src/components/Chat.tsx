@@ -2,6 +2,7 @@ import { AlertCircle, Info, Plus, SearchCode, X } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 import type { IncidentContext, OpsState, SkillSummary, TopologyGraph } from "../types";
+import { ActionReview } from "./ActionReview";
 import { Approval } from "./Approval";
 import { Composer } from "./Composer";
 import { Message } from "./Message";
@@ -21,6 +22,11 @@ interface ChatProps {
   onSend: (input: string, incidentContext?: IncidentContext) => void;
   onStop: () => void;
   onApproval: (approvalId: string, approved: boolean) => void;
+  onProposeRemediation?: (claimIds: string[]) => void;
+  onApproveAction?: (actionId: string, requestHash: string, approved: boolean) => void;
+  onExecuteAction?: (actionId: string) => void;
+  proposing?: boolean;
+  resolvingActions?: Set<string>;
   onResume?: () => void;
   onFork?: () => void;
   onDismissError: () => void;
@@ -44,6 +50,11 @@ export function Chat({
   onSend,
   onStop,
   onApproval,
+  onProposeRemediation,
+  onApproveAction,
+  onExecuteAction,
+  proposing,
+  resolvingActions,
   onResume,
   onFork,
   onDismissError,
@@ -171,6 +182,8 @@ export function Chat({
                     item={item}
                     selectedEvidenceId={state.selectedEvidenceId}
                     onSelectEvidence={onSelectEvidence}
+                    onProposeRemediation={onProposeRemediation}
+                    proposing={proposing}
                   />
                 );
               }
@@ -181,6 +194,18 @@ export function Chat({
                       item={item}
                       highlighted={evidenceIdOf(item) === state.selectedEvidenceId}
                       onSelectEvidence={onSelectEvidence}
+                    />
+                  </div>
+                );
+              }
+              if (item.kind === "action") {
+                return (
+                  <div key={item.id} className="pl-0 sm:pl-12">
+                    <ActionReview
+                      item={item}
+                      resolving={resolvingActions?.has(item.actionId) ?? false}
+                      onApprove={onApproveAction ?? (() => undefined)}
+                      onExecute={onExecuteAction ?? (() => undefined)}
                     />
                   </div>
                 );

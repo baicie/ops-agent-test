@@ -27,6 +27,16 @@ demo-test:
 continuity-test:
     cargo test --locked --test continuity --test recovery_fault
 
+remediation-test:
+    cargo test --locked --test remediation
+
+ops-test:
+    cargo test --locked --test ops --test contracts --test config --test scenario_eval
+
+capacity-test:
+    cargo test --locked --test capacity
+    cargo test --locked --lib disk_full
+
 acceptance-test:
     python3 -m unittest discover -s scripts/tests -v
 
@@ -41,6 +51,11 @@ check: fmt-check clippy test web-build
 
 release-check: web-install check audit
     cargo build --locked --release
+
+release-dry-run: web-build
+    cargo build --locked --release
+    python3 scripts/release_manifest.py --root . --out dist/release-dry-run \
+        --binary target/release/opscodex --web-dir web/dist
 
 build: web-build
     cargo build --locked --release

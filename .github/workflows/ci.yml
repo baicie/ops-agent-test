@@ -55,6 +55,11 @@ jobs:
       - name: Build release binary
         run: cargo build --locked --release
 
+      - name: Write release checksums and SBOM
+        run: >-
+          python3 scripts/release_manifest.py --root . --out target/release-manifest
+          --binary target/release/opscodex
+
   web:
     name: Web
     runs-on: ubuntu-latest

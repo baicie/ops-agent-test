@@ -19,6 +19,19 @@ All notable changes to OpsCodex are documented in this file. The format follows
 - SQLite WAL default store, JSONL migrate/export, durable checkpoints/approvals/leases,
   recovery classification, context compaction, thread fork, and a simulated
   crash-after-checkpoint recovery suite.
+- Structured Safe Remediation: ActionPlan state machine, parameter-bound approvals,
+  isolated demo fault reset and Kubernetes scale runners, kill switch, and
+  hash-chained Security Audit. Default configuration still performs zero mutations.
+- Production-readiness operations: `doctor` / `config validate` / `storage verify` /
+  `storage backup` / `audit verify`, `/readyz`, loopback-only binds without TLS,
+  and frozen `/api/v1` contract fixtures. `/healthz` is process liveness only.
+- Release dry-run manifest: SHA-256 checksums, CycloneDX SBOM from Cargo.lock and
+  npm lockfile, and LICENSE check. It does not create a `v1.0.0` tag.
+- Local capacity harness: append/projection p95, four concurrent turns, artifact
+  and turn-input quota fail-closed, and synthetic disk-full error mapping. Real
+  OS disk exhaustion, zero-loss validation, and 24h soak are not release gates.
+- Deterministic scenarios for alert-driven error surge, latency regression with
+  topology, and downstream dependency failure.
 
 ### Documentation
 

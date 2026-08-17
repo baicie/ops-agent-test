@@ -1,0 +1,43 @@
+{
+  "version": "v1",
+  "evolution": "additive",
+  "notes": "Fields may be added. Removing or changing semantics requires a new API major. Unknown event fields must be ignored.",
+  "error_envelope": {
+    "error": {
+      "code": "string",
+      "message": "string"
+    }
+  },
+  "get_routes": [
+    "/healthz",
+    "/readyz",
+    "/metrics",
+    "/api/v1/workspaces",
+    "/api/v1/threads",
+    "/api/v1/extensions",
+    "/api/v1/skills",
+    "/api/v1/remediation",
+    "/api/v1/audit"
+  ],
+  "not_found": "/api/v1/does-not-exist",
+  "event_types": [
+    "thread_created",
+    "user_message",
+    "turn_started",
+    "assistant_delta",
+    "assistant_completed",
+    "tool_started",
+    "tool_proposed",
+    "tool_authorized",
+    "tool_execution_started",
+    "tool_completed",
+    "approval_required",
+    "approval_resolved",
+    "turn_completed",
+    "turn_failed",
+    "turn_cancelled",
+    "context_compacted",
+    "action_updated"
+  ],
+  "storage_schema_versions": [1, 2]
+}

@@ -49,6 +49,13 @@ impl ArtifactStore {
     }
 
     pub async fn put_in(&self, workspace_id: &str, bytes: &[u8]) -> Result<String> {
+        if bytes.len() > self.max_bytes {
+            return Err(OpsCodexError::Protocol(format!(
+                "artifact exceeds quota ({} bytes > {} bytes); reduce output or raise the artifact limit",
+                bytes.len(),
+                self.max_bytes
+            )));
+        }
         let digest = sha256_hex(bytes);
         let key = scoped_key(workspace_id, &digest);
         match &self.backend {

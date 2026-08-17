@@ -107,3 +107,41 @@ fn citation_validator_rejects_missing_and_unknown_evidence() {
     let errors = validate_diagnosis(&diagnosis, &[evidence]);
     assert_eq!(errors.len(), 2);
 }
+
+#[test]
+fn unsourced_claims_are_stripped_when_evidence_is_insufficient() {
+    let diagnosis = Diagnosis {
+        summary: "maybe".into(),
+        claims: vec![
+            Claim {
+                claim_id: Default::default(),
+                kind: ClaimKind::Observed,
+                statement: "unsourced".into(),
+                evidence_ids: Vec::new(),
+                confidence: Confidence::High,
+            },
+            Claim {
+                claim_id: Default::default(),
+                kind: ClaimKind::Recommended,
+                statement: "collect more signals".into(),
+                evidence_ids: Vec::new(),
+                confidence: Confidence::Low,
+            },
+        ],
+        recommended_actions: Vec::new(),
+        limitations: Vec::new(),
+    };
+    let limited = opscodex::evidence::apply_citation_limitations(diagnosis, &[]);
+    assert!(
+        limited
+            .claims
+            .iter()
+            .all(|claim| claim.kind == ClaimKind::Recommended)
+    );
+    assert!(
+        limited
+            .limitations
+            .iter()
+            .any(|item| item.contains("Abstained") || item.contains("insufficient"))
+    );
+}

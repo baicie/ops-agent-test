@@ -53,7 +53,8 @@ exec = false
 
 # Extensions are discovered from local files only. Installation is not exposed
 # through the unauthenticated Web API. production_safe disables Custom Tool and
-# stdio MCP; HTTP MCP still requires an explicit host allowlist and TLS.
+# stdio MCP, and cannot be combined with tools.exec. HTTP MCP still requires an
+# explicit host allowlist and TLS.
 [extensions]
 production_safe = false
 allow_custom_tools = false
@@ -71,6 +72,8 @@ max_skill_context_bytes = 4096
 # path = "skills/db-pool"
 # workspaces = ["default"]
 
+# Without TLS, host must be loopback (127.0.0.1, localhost, or ::1).
+# Binding 0.0.0.0 is rejected.
 [server]
 host = "127.0.0.1"
 port = 3000
@@ -81,3 +84,12 @@ port = 3000
 backend = "sqlite"
 approval_ttl_seconds = 3600
 lease_ttl_seconds = 30
+
+# Remediation is off by default. Enabling it still requires per-workspace
+# allow_remediation, an exact request-hash approval, and does not auto-rollback.
+[remediation]
+enabled = false
+kill_switch = false
+demo_fault_url = "http://127.0.0.1:8080"
+approval_ttl_seconds = 1800
+
